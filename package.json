@@ -43,7 +43,9 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "verify:package": "node scripts/verify-package.mjs",
     "check": "pnpm run typecheck && pnpm run build && pnpm run verify:package",
-    "prepack": "pnpm run check"
+    "prepack": "pnpm run check",
+    "format": "prettier --write . --ignore-unknown",
+    "format:check": "prettier --check . --ignore-unknown"
   },
   "peerDependencies": {
     "@haneoka/vega": "^0.1.0"
@@ -52,7 +54,8 @@
     "@haneoka/vega": "^0.1.0",
     "@types/node": "^26.1.0",
     "typescript": "^6.0.3",
-    "vite": "^7.3.6"
+    "vite": "^7.3.6",
+    "prettier": "3.7.4"
   },
   "engines": {
     "node": ">=20"
@@ -63,6 +66,8 @@
     "provenance": true
   },
   "dependencies": {
+    "cytoscape": "3.34.3",
+    "cytoscape-dagre": "4.0.1",
     "lucide": "^1.27.0"
   }
 }

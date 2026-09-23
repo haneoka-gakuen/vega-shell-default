@@ -12,12 +12,11 @@ const collectTargets = (value) => {
   return Object.values(value).flatMap(collectTargets);
 };
 
-const targets = new Set([
-  manifest.main,
-  manifest.module,
-  manifest.types,
-  ...collectTargets(manifest.exports),
-].filter((value) => typeof value === "string" && value.startsWith("./dist/")));
+const targets = new Set(
+  [manifest.main, manifest.module, manifest.types, ...collectTargets(manifest.exports)].filter(
+    (value) => typeof value === "string" && value.startsWith("./dist/"),
+  ),
+);
 
 for (const target of targets) {
   try {

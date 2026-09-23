@@ -82,10 +82,7 @@ const iconNodes: Readonly<Record<VegaShellIconName, IconNode>> = {
  * Renders Lucide's package-owned icon nodes into the mount document. Keeping
  * the renderer document-aware lets the shell work inside editor iframes.
  */
-export const createVegaShellIcon = (
-  document: Document,
-  name: VegaShellIconName,
-): SVGSVGElement => {
+export const createVegaShellIcon = (document: Document, name: VegaShellIconName): SVGSVGElement => {
   const icon = document.createElementNS(SVG_NAMESPACE, "svg");
   icon.classList.add("vega-shell-icon");
   icon.setAttribute("viewBox", "0 0 24 24");

@@ -1,1294 +1,1073 @@
-import type {
-  VegaDisposable,
-  VegaUiSlotContext,
+import {
+  parseAdvRichText,
+  type AdvRichTextNode,
+  type VegaDisposable,
+  type VegaUiSlotContext,
 } from "@haneoka/vega/plugin";
 import {
   VEGA_SHELL_CONTROLLER,
-  type VegaShellController,
+  VEGA_SHELL_TYPOGRAPHY,
   type VegaShellScreen,
   type VegaShellSnapshot,
 } from "@haneoka/vega/shell";
+import { shellText, shellUiLocale } from "./i18n";
+import { createVegaShellIcon, type VegaShellIconName } from "./icons";
 import {
   applyVegaShellColorMode,
   readVegaShellColorMode,
-  type VegaShellColorMode,
-  VEGA_SHELL_COLOR_MODE_STORAGE_KEY,
   writeVegaShellColorMode,
+  VEGA_SHELL_COLOR_MODE_STORAGE_KEY,
+  type VegaShellColorMode,
 } from "./colorMode";
-import {
-  createVegaShellIcon,
-  type VegaShellIconName,
-} from "./icons";
-import {
-  layoutVegaShellFlow,
-  vegaFlowEdgePath,
-  type VegaFlowLayoutEdge,
-} from "./flowLayout";
-import {
-  vegaShellSavePage,
-  vegaShellSaveSlotNames,
-} from "./saveSlots";
 import { VEGA_DEFAULT_THEME_CSS } from "./theme";
+import { vegaShellSaveSlotNames } from "./saveSlots";
 
-const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
-let flowMarkerSerial = 0;
-let shellDialogSerial = 0;
-
-interface VegaShellViewState {
-  savePage: number;
-}
-
-const labels: Readonly<Record<VegaShellScreen, string>> = {
-  title: "Title",
-  game: "Game",
-  menu: "Menu",
-  save: "Save",
-  load: "Load",
-  settings: "Settings",
-  backlog: "Backlog",
-  gallery: "Extra",
-  flowchart: "Flowchart",
+const pages = [
+  ["menu", "Menu", "SYSTEM"],
+  ["save", "Save", "SAVE"],
+  ["load", "Load", "LOAD"],
+  ["backlog", "Backlog", "BACKLOG"],
+  ["flowchart", "Flowchart", "FLOWCHART"],
+  ["settings", "Settings", "CONFIG"],
+  ["gallery", "Extra", "EXTRA"],
+] as const;
+const pageIcons: Record<string, VegaShellIconName> = {
+  menu: "menu",
+  save: "save",
+  load: "load",
+  backlog: "backlog",
+  flowchart: "flowchart",
+  settings: "settings",
+  gallery: "gallery",
 };
-
-export const mountDefaultShell = (host: HTMLElement, context: VegaUiSlotContext): VegaDisposable => {
-  const controller = context.services(VEGA_SHELL_CONTROLLER);
-  if (!controller) throw new ReferenceError("The Vega default shell requires VEGA_SHELL_CONTROLLER");
-  const document = host.ownerDocument;
-  const view = document.defaultView;
-  const storage = safeLocalStorage(view);
-  let colorMode = readVegaShellColorMode(storage);
-  applyVegaShellColorMode(context.root, colorMode);
-  const root = document.createElement("section");
+const plain = (source: string): string => {
+  const walk = (nodes: readonly AdvRichTextNode[]): string =>
+    nodes
+      .map((node) =>
+        node.type === "text"
+          ? node.value
+          : node.type === "break"
+            ? "\n"
+            : node.type === "ruby"
+              ? node.base
+              : node.type === "space"
+                ? " "
+                : "children" in node
+                  ? walk(node.children)
+                  : "",
+      )
+      .join("");
+  return walk(parseAdvRichText(source));
+};
+const release = (value: VegaDisposable | undefined) => {
+  if (typeof value === "function") void value();
+  else if (value && "dispose" in value) void value.dispose();
+  else if (value && "destroy" in value) void value.destroy();
+  else if (value) void value.close();
+};
+const styles = new WeakMap<Document, { element: HTMLStyleElement; users: number }>();
+function installStyle(document: Document) {
+  let entry = styles.get(document);
+  if (!entry) {
+    const element = document.createElement("style");
+    element.textContent = VEGA_DEFAULT_THEME_CSS;
+    element.dataset.vegaShellStyle = "";
+    (document.head ?? document.documentElement).append(element);
+    entry = { element, users: 0 };
+    styles.set(document, entry);
+  }
+  entry.users++;
+  return () => {
+    if (--entry.users === 0) {
+      entry.element.remove();
+      styles.delete(document);
+    }
+  };
+}
+let serial = 0;
+export function mountDefaultShell(host: HTMLElement, context: VegaUiSlotContext): VegaDisposable {
+  const service = context.services(VEGA_SHELL_CONTROLLER);
+  if (!service) throw new Error("A shell controller is required");
+  const controller = service;
+  const document = host.ownerDocument,
+    root = document.createElement("section"),
+    events = new AbortController(),
+    id = `vega-menu-${++serial}`;
   root.className = "vega-shell";
-  root.setAttribute("aria-live", "polite");
-  root.setAttribute("aria-label", "Visual novel menu");
-  const releaseStyle = installShellStyle(document);
+  root.hidden = true;
+  root.id = id;
   host.append(root);
-
-  let previousFocus: Element | null = null;
-  let renderedScreen: VegaShellScreen | undefined;
-  let latest = controller.snapshot();
-  const originalTabIndex = context.root.getAttribute("tabindex");
-  if (originalTabIndex === null) context.root.tabIndex = -1;
-  let inertedElements: Array<readonly [HTMLElement, boolean]> = [];
-  const setBackgroundInert = (active: boolean): void => {
-    if (!active) {
-      for (const [element, previous] of inertedElements) {
-        element.inert = previous;
-      }
-      inertedElements = [];
+  const removeStyle = installStyle(document),
+    typography = context.services(VEGA_SHELL_TYPOGRAPHY)?.create(context);
+  let snapshot = controller.snapshot(),
+    previousScreen: VegaShellScreen | undefined,
+    previousLocale = "",
+    previousFocus: HTMLElement | null = null;
+  let page = 0,
+    saveGroup = "manual",
+    settingsTab = "reading",
+    query = "",
+    disposed = false,
+    epoch = 0,
+    busy = false,
+    viewCleanup: (() => void) | undefined;
+  let colorMode: VegaShellColorMode = "dark";
+  let storage: Storage | null = null;
+  try {
+    storage = document.defaultView?.localStorage ?? null;
+    if (storage?.getItem(VEGA_SHELL_COLOR_MODE_STORAGE_KEY)) colorMode = readVegaShellColorMode(storage);
+  } catch {}
+  applyVegaShellColorMode(context.root, colorMode);
+  const inerted = new Map<HTMLElement, boolean>();
+  const media = new Set<HTMLMediaElement>();
+  const t = (text: string) => shellText(text, shellUiLocale(snapshot.settings.uiLanguage, document));
+  const node = <K extends keyof HTMLElementTagNameMap>(tag: K, className = "") => {
+    const el = document.createElement(tag);
+    el.className = className;
+    return el;
+  };
+  const text = (tag: "span" | "h1" | "h2" | "h3" | "p" | "strong", value: string, className = "", translate = true) => {
+    const el = node(tag, className);
+    const content = translate ? t(value) : value;
+    el.dataset.shellLabel = content;
+    el.textContent = content;
+    return el;
+  };
+  const paintText = (scope: HTMLElement) => {
+    for (const element of scope.querySelectorAll<HTMLElement>("[data-shell-label]"))
+      typography?.set(element, element.dataset.shellLabel ?? "");
+  };
+  const button = (
+    label: string,
+    action: () => unknown,
+    options: {
+      className?: string;
+      icon?: VegaShellIconName;
+      disabled?: boolean;
+      translate?: boolean;
+    } = {},
+  ) => {
+    const el = node("button", options.className ?? "");
+    el.type = "button";
+    el.setAttribute("aria-label", options.translate === false ? label : t(label));
+    el.disabled = Boolean(options.disabled);
+    if (options.icon) el.append(createVegaShellIcon(document, options.icon));
+    el.append(text("span", label, "vega-shell__button-label", options.translate !== false));
+    el.addEventListener("click", () => {
+      void run(action);
+    });
+    return el;
+  };
+  const setError = (message: string) => {
+    const target = root.querySelector<HTMLElement>(".vega-shell__error");
+    if (target) {
+      target.textContent = message;
+      target.hidden = !message;
+    }
+  };
+  async function run(action: () => unknown) {
+    if (busy) return;
+    try {
+      busy = true;
+      root.setAttribute("aria-busy", "true");
+      setError("");
+      await action();
+    } catch (error) {
+      setError(error instanceof Error ? error.message : String(error));
+    } finally {
+      busy = false;
+      root.removeAttribute("aria-busy");
+    }
+  }
+  function silence() {
+    for (const item of media) {
+      item.pause();
+      item.removeAttribute("src");
+      item.load();
+    }
+    media.clear();
+  }
+  function clearView() {
+    epoch++;
+    viewCleanup?.();
+    viewCleanup = undefined;
+    silence();
+    typography?.releaseWithin(root);
+    root.replaceChildren();
+  }
+  function setInert(open: boolean) {
+    if (!open) {
+      for (const [element, was] of inerted) element.inert = was;
+      inerted.clear();
       return;
     }
-    if (inertedElements.length) return;
-    const candidates = [
-      ...Array.from(context.root.children).filter(
-        (element) => element !== host && !element.contains(host),
-      ),
-      ...Array.from(host.children).filter((element) => element !== root),
-    ];
-    for (const element of candidates) {
-      const htmlElement = element as HTMLElement;
-      inertedElements.push([htmlElement, htmlElement.inert]);
-      htmlElement.inert = true;
+    if (inerted.size) return;
+    for (const element of [...context.root.children, ...host.children])
+      if (element !== host && element !== root && !element.contains(host) && element instanceof HTMLElement) {
+        inerted.set(element, element.inert);
+        element.inert = true;
+      }
+  }
+  const close = () => controller.close();
+  const open = (screen: Exclude<VegaShellScreen, "game">) => {
+    delete context.root.dataset.vegaUiHidden;
+    return controller.open(screen);
+  };
+  function confirm(message: string, action: () => unknown, danger = false) {
+    const existing = root.querySelector(".vega-shell__confirmation");
+    if (existing) return;
+    const previous = document.activeElement as HTMLElement | null,
+      overlay = node("div", "vega-shell__confirmation"),
+      dialog = node("section", "vega-shell__confirm-panel");
+    dialog.setAttribute("role", "alertdialog");
+    dialog.setAttribute("aria-modal", "true");
+    const heading = text("h3", message);
+    heading.id = `${id}-confirm`;
+    dialog.setAttribute("aria-labelledby", heading.id);
+    const panel = root.querySelector<HTMLElement>(".vega-shell__panel")!;
+    panel.inert = true;
+    const dismiss = () => {
+      panel.inert = false;
+      typography?.releaseWithin(overlay);
+      overlay.remove();
+      previous?.focus({ preventScroll: true });
+    };
+    const cancel = button("Cancel", dismiss),
+      yes = button(
+        "Confirm",
+        () => {
+          dismiss();
+          return action();
+        },
+        { className: danger ? "is-danger" : "is-primary" },
+      );
+    const actions = node("div", "vega-shell__confirm-actions");
+    actions.append(cancel, yes);
+    dialog.append(heading, actions);
+    overlay.append(dialog);
+    root.append(overlay);
+    paintText(overlay);
+    overlay.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        dismiss();
+      } else trapFocus(event, dialog);
+    });
+    cancel.focus();
+  }
+  function refreshControls() {
+    for (const element of root.querySelectorAll<HTMLInputElement | HTMLSelectElement>("[data-setting]")) {
+      const key = element.dataset.setting as keyof typeof snapshot.settings,
+        value = snapshot.settings[key];
+      if (element instanceof HTMLInputElement && element.type === "checkbox") element.checked = Boolean(value);
+      else if (document.activeElement !== element) {
+        const selected = String(value ?? "");
+        element.value =
+          element instanceof HTMLSelectElement && ![...element.options].some((option) => option.value === selected)
+            ? "auto"
+            : selected;
+      }
+      const output = element.closest(".vega-shell__setting")?.querySelector("output");
+      if (output) output.textContent = formatSetting(key, Number(value));
     }
-  };
-  const viewState: VegaShellViewState = { savePage: 0 };
-  let error = "";
-  const openScreen = (screen: Exclude<VegaShellScreen, "game">): void => {
-    controller.open(screen);
-  };
-  const goBack = (): void => controller.close();
-  const render = (snapshot = latest): void => {
-    const screenChanged = renderedScreen !== snapshot.screen;
-    renderedScreen = snapshot.screen;
-    latest = snapshot;
-    const open = snapshot.screen !== "game";
+    for (const element of root.querySelectorAll<HTMLElement>("[data-toggle]"))
+      element.setAttribute(
+        "aria-pressed",
+        String(element.dataset.toggle === "auto" ? snapshot.autoPlay : snapshot.fastForward),
+      );
+    for (const element of root.querySelectorAll<HTMLButtonElement>("[data-quick-load]"))
+      element.disabled = !snapshot.saves.some((save) => save.slot === "quick");
+  }
+  function render() {
+    const openNow = snapshot.screen !== "game",
+      screenChanged = previousScreen !== snapshot.screen,
+      locale = shellUiLocale(snapshot.settings.uiLanguage, document);
+    if (openNow && previousScreen === "game") previousFocus = document.activeElement as HTMLElement | null;
     root.dataset.screen = snapshot.screen;
-    root.hidden = !open;
-    host.classList.toggle("vega-shell-host--active", open);
-    setBackgroundInert(open);
-    for (const media of root.querySelectorAll<HTMLMediaElement>("audio, video")) {
-      media.pause();
-      media.removeAttribute("src");
-      media.load();
+    root.lang = locale;
+    root.hidden = !openNow;
+    host.classList.toggle("vega-shell-host--active", openNow);
+    setInert(openNow);
+    if (!openNow) {
+      if (previousScreen !== "game") {
+        clearView();
+        queueMicrotask(() => {
+          if (previousFocus?.isConnected) previousFocus.focus({ preventScroll: true });
+          else context.root.focus({ preventScroll: true });
+        });
+      }
+      previousScreen = "game";
+      return;
     }
-    root.replaceChildren();
-    if (!open) return;
-
-    const scrim = button(document, "", goBack);
-    scrim.className = "vega-shell__scrim";
-    scrim.tabIndex = -1;
+    if (!screenChanged && previousLocale === locale && (snapshot.screen === "settings" || snapshot.screen === "menu")) {
+      refreshControls();
+      return;
+    }
+    previousScreen = snapshot.screen;
+    previousLocale = locale;
+    clearView();
+    const revision = epoch;
+    const scrim = node("div", "vega-shell__scrim");
     scrim.setAttribute("aria-hidden", "true");
-    const panel = document.createElement("div");
-    panel.className = "vega-shell__panel";
+    const panel = node("div", "vega-shell__panel");
+    panel.tabIndex = -1;
     panel.setAttribute("role", snapshot.screen === "title" ? "region" : "dialog");
     if (snapshot.screen !== "title") panel.setAttribute("aria-modal", "true");
-    if (snapshot.screen === "menu") panel.setAttribute("aria-label", "Game menu");
-    else panel.setAttribute("aria-labelledby", "vega-shell-heading");
-    renderScreen(
-      document,
-      panel,
-      controller,
-      snapshot,
-      error,
-      run,
-      colorMode,
-      setColorMode,
-      openScreen,
-      goBack,
-      viewState,
+    panel.setAttribute("aria-labelledby", `${id}-heading`);
+    const header = node("header", "vega-shell__header"),
+      heading = node("div", "vega-shell__heading");
+    const pageInfo = pages.find(([key]) => key === snapshot.screen),
+      eyebrow = node("span", "vega-shell__eyebrow");
+    eyebrow.textContent = snapshot.screen === "title" ? "VISUAL NOVEL" : (pageInfo?.[2] ?? "SYSTEM");
+    const title = text(
+      snapshot.screen === "title" ? "h1" : "h2",
+      snapshot.screen === "title" ? snapshot.title : (pageInfo?.[1] ?? "Menu"),
+      "",
+      snapshot.screen !== "title",
     );
-    root.append(scrim, panel);
-    if (screenChanged) {
-      queueMicrotask(() =>
-        panel
-          .querySelector<HTMLElement>(
-            "button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled])",
-          )
-          ?.focus(),
-      );
-    }
-  };
-
-  const setColorMode = (next: VegaShellColorMode): void => {
-    colorMode = next;
-    applyVegaShellColorMode(context.root, next);
-    writeVegaShellColorMode(storage, next);
-  };
-
-  const run = (operation: () => void | Promise<void>): void => {
-    error = "";
-    Promise.resolve()
-      .then(operation)
-      .catch((reason: unknown) => {
-        error = reason instanceof Error ? reason.message : String(reason);
-        render();
+    title.id = `${id}-heading`;
+    heading.append(eyebrow, title);
+    header.append(heading);
+    if (snapshot.screen !== "title") {
+      const resume = button("Back to game", close, {
+        className: "vega-shell__close",
+        icon: "close",
       });
-  };
-  let subscriptionEmitted = false;
-  const subscription = controller.subscribe((snapshot) => {
-    subscriptionEmitted = true;
-    if (
-      latest.screen === snapshot.screen &&
-      syncSnapshotControls(root, snapshot)
-    ) {
-      latest = snapshot;
-      return;
+      if (snapshot.navigationOrigin === "title") {
+        resume.querySelector("[data-shell-label]")!.textContent = t("Back");
+        (resume.querySelector("[data-shell-label]") as HTMLElement).dataset.shellLabel = t("Back");
+      }
+      header.append(resume);
     }
-    if (latest.screen === "game" && snapshot.screen !== "game") previousFocus = document.activeElement;
-    render(snapshot);
-    if (snapshot.screen === "game") {
-      queueMicrotask(() => {
-        if (
-          previousFocus instanceof HTMLElement &&
-          previousFocus.isConnected
-        ) {
-          previousFocus.focus();
-        } else {
-          context.root.focus({ preventScroll: true });
+    const layout = node("div", "vega-shell__layout");
+    if (!["title", "menu"].includes(snapshot.screen)) {
+      const nav = node("nav", "vega-shell__navigation");
+      nav.setAttribute("aria-label", t("Game menu pages"));
+      for (const [key, label, en] of pages) {
+        if (key === "menu") continue;
+        if (snapshot.navigationOrigin === "title" && key === "save") continue;
+        const item = button(label, () => open(key));
+        const sub = node("small");
+        sub.textContent = en;
+        item.append(sub);
+        item.dataset.page = key;
+        if (key === snapshot.screen) item.setAttribute("aria-current", "page");
+        nav.append(item);
+      }
+      layout.append(nav);
+    }
+    const content = node("main", "vega-shell__content");
+    layout.append(content);
+    const footer = node("footer", "vega-shell__footer"),
+      game = text("span", snapshot.title, "vega-shell__game-name", false),
+      hint = text(
+        "span",
+        snapshot.screen === "title" ? "Choose a chapter of your story" : "Esc · Back",
+        "vega-shell__key-hint",
+      );
+    footer.append(game, hint);
+    const error = node("p", "vega-shell__error");
+    error.setAttribute("role", "alert");
+    error.hidden = true;
+    panel.append(header, layout, footer, error);
+    root.append(scrim, panel);
+    if (snapshot.screen === "title" || snapshot.screen === "menu") renderMain(content, snapshot.screen === "title");
+    else if (snapshot.screen === "save" || snapshot.screen === "load") renderSaves(content, snapshot.screen);
+    else if (snapshot.screen === "settings") renderSettings(content);
+    else if (snapshot.screen === "backlog") renderBacklog(content);
+    else if (snapshot.screen === "gallery") renderGallery(content);
+    else if (snapshot.screen === "flowchart") {
+      content.classList.add("vega-shell__flow");
+      void import("./flowchart")
+        .then(({ mountFlowchart }) => {
+          if (disposed || revision !== epoch) return;
+          const flow = mountFlowchart(content, snapshot, controller, (action) => void run(action));
+          viewCleanup = () => flow.dispose();
+        })
+        .catch((error) => {
+          if (revision === epoch) setError(String(error));
+        });
+    }
+    refreshControls();
+    paintText(panel);
+    if (screenChanged)
+      queueMicrotask(() =>
+        panel.querySelector<HTMLElement>("button:not(:disabled),input,select")?.focus({ preventScroll: true }),
+      );
+  }
+  function renderMain(content: HTMLElement, title: boolean) {
+    content.classList.add("vega-shell__overview");
+    const actions = node("nav", "vega-shell__main-actions");
+    actions.setAttribute("aria-label", t("Game menu pages"));
+    const primary = button(title ? "Start" : "Resume", () => (title ? controller.start() : close()), {
+      className: "vega-shell__start",
+      icon: "start",
+    });
+    actions.append(primary);
+    if (title)
+      actions.append(
+        button("Continue", () => controller.continue(), {
+          disabled: !snapshot.canContinue,
+        }),
+      );
+    for (const [key, label] of pages) {
+      if (key === "menu" || (title && ["save", "backlog", "flowchart"].includes(key))) continue;
+      actions.append(button(label, () => open(key), { icon: pageIcons[key]! }));
+    }
+    if (!title && controller.returnToTitle)
+      actions.append(
+        button(
+          "Return to title",
+          () =>
+            confirm("Return to the title screen? Unsaved progress will be lost.", () => controller.returnToTitle?.()),
+          { className: "vega-shell__title-return", icon: "return" },
+        ),
+      );
+    const aside = node("aside", "vega-shell__now-playing");
+    aside.append(
+      text("span", title ? "YOUR STORY" : "NOW PLAYING", "vega-shell__eyebrow", false),
+      text("h3", snapshot.title, "", false),
+    );
+    const talk = context.state.talk,
+      line = talk?.visible ? talk.text : (snapshot.backlog.at(-1)?.text ?? ""),
+      speaker = talk?.visible ? talk.speaker : (snapshot.backlog.at(-1)?.speaker ?? "");
+    if (speaker) aside.append(text("strong", speaker, "vega-shell__current-speaker", false));
+    if (line) aside.append(text("p", plain(line), "vega-shell__current-dialogue", false));
+    if (!title) {
+      const utilities = node("div", "vega-shell__utilities");
+      const auto = button("Auto play", () => controller.toggleAuto(), {
+        icon: "auto",
+      });
+      auto.dataset.toggle = "auto";
+      const fast = button("Fast forward", () => controller.toggleFastForward(), { icon: "speed" });
+      fast.dataset.toggle = "fast";
+      const quick = button(
+        "Quick load",
+        () => confirm("Load this save? Current unsaved progress will be lost.", () => controller.quickLoad()),
+        { icon: "load" },
+      );
+      quick.dataset.quickLoad = "";
+      utilities.append(
+        auto,
+        fast,
+        button(
+          "Quick save",
+          async () => {
+            await controller.quickSave();
+            setError(t("Saved successfully"));
+          },
+          { icon: "save" },
+        ),
+        quick,
+        button("Fullscreen", () => toggleFullscreen(), { icon: "fullscreen" }),
+      );
+      aside.append(utilities);
+    }
+    content.append(actions, aside);
+  }
+  function renderSettings(content: HTMLElement) {
+    const categories = [
+      ["reading", "Text and playback"],
+      ["audio", "Sound"],
+      ["display", "Display"],
+      ["language", "Language"],
+    ] as const;
+    const tabs = node("div", "vega-shell__tabs");
+    tabs.setAttribute("role", "tablist");
+    const body = node("section", "vega-shell__settings");
+    body.setAttribute("role", "tabpanel");
+    body.id = `${id}-settings`;
+    const select = (key: string) => {
+      settingsTab = key;
+      typography?.releaseWithin(body);
+      body.replaceChildren();
+      for (const tab of tabs.querySelectorAll<HTMLButtonElement>("button")) {
+        const selected = tab.dataset.tab === key;
+        tab.setAttribute("aria-selected", String(selected));
+        tab.tabIndex = selected ? 0 : -1;
+        if (selected) body.setAttribute("aria-labelledby", tab.id);
+      }
+      const heading = categories.find(([name]) => name === key)![1];
+      body.append(text("h3", heading, "vega-shell__section-title"));
+      if (key === "reading") {
+        range("textSpeed", "Text speed", 0.1, 5, 0.1);
+        range("textSize", "Text size", 0.5, 2, 0.05);
+        range("autoDelay", "Auto delay", 0, 10, 0.1);
+        toggle("instantText", "Instant text");
+        const preview = node("div", "vega-shell__text-preview");
+        preview.append(
+          text("span", "TEXT PREVIEW", "vega-shell__eyebrow", false),
+          text("p", plain(context.state.talk.text) || t("Preview text"), "", false),
+        );
+        body.append(preview);
+      } else if (key === "audio") {
+        range("masterVolume", "Master volume", 0, 1, 0.01);
+        range("bgmVolume", "Music volume", 0, 1, 0.01);
+        range("voiceVolume", "Voice volume", 0, 1, 0.01);
+        range("seVolume", "Effects volume", 0, 1, 0.01);
+        toggle("bgmEnabled", "Enable music");
+      } else if (key === "display") {
+        const select = node("select");
+        select.setAttribute("aria-label", t("Appearance"));
+        for (const mode of ["dark", "light", "system"] as const) {
+          const option = node("option");
+          option.value = mode;
+          option.textContent = t(mode === "dark" ? "Dark" : mode === "light" ? "Light" : "System");
+          option.selected = colorMode === mode;
+          select.append(option);
+        }
+        select.addEventListener("change", () => {
+          colorMode = select.value as VegaShellColorMode;
+          applyVegaShellColorMode(context.root, colorMode);
+          writeVegaShellColorMode(storage, colorMode);
+        });
+        body.append(setting("Appearance", select));
+        toggle("subtitlesEnabled", "Subtitles");
+        toggle("reducedMotion", "Reduce motion");
+        toggle("highContrast", "High contrast");
+        body.append(
+          button("Fullscreen", () => toggleFullscreen(), {
+            className: "vega-shell__setting-action",
+            icon: "fullscreen",
+          }),
+        );
+      } else
+        for (const [name, label] of [
+          ["uiLanguage", "Interface language"],
+          ["language", "Story language"],
+        ] as const) {
+          const select = node("select");
+          select.dataset.setting = name;
+          select.setAttribute("aria-label", t(label));
+          const languages = new Map<string, string>([["auto", t("Automatic")]]);
+          if (name === "uiLanguage")
+            for (const [code, label] of [
+              ["ja", "日本語"],
+              ["en", "English"],
+              ["zh-CN", "简体中文"],
+              ["zh-TW", "繁體中文"],
+              ["ko", "한국어"],
+            ])
+              languages.set(code!, label!);
+          if (name === "language") {
+            const project = context.player.story.vegaProject as { locales?: unknown } | undefined;
+            const locales = project?.locales ?? context.player.story.localization?.locales ?? [];
+            if (Array.isArray(locales))
+              for (const language of locales) {
+                if (typeof language !== "string" || languages.has(language)) continue;
+                let label = language;
+                try {
+                  label = new Intl.DisplayNames([root.lang], { type: "language" }).of(language) ?? language;
+                } catch {}
+                languages.set(language, label);
+              }
+          }
+          for (const [value, title] of languages) {
+            const option = node("option");
+            option.value = value!;
+            option.textContent = title!;
+            option.selected = (languages.has(snapshot.settings[name]) ? snapshot.settings[name] : "auto") === value;
+            select.append(option);
+          }
+          select.addEventListener("change", () => controller.setSetting(name, select.value));
+          body.append(setting(label, select));
+        }
+      paintText(body);
+      refreshControls();
+    };
+    const setting = (label: string, input: HTMLElement, output?: HTMLOutputElement) => {
+      const row = node("label", "vega-shell__setting");
+      row.append(text("span", label), input);
+      if (output) row.append(output);
+      return row;
+    };
+    const range = (
+      key: "textSpeed" | "textSize" | "autoDelay" | "masterVolume" | "bgmVolume" | "voiceVolume" | "seVolume",
+      label: string,
+      min: number,
+      max: number,
+      step: number,
+    ) => {
+      const input = node("input");
+      input.type = "range";
+      input.min = String(min);
+      input.max = String(max);
+      input.step = String(step);
+      input.value = String(snapshot.settings[key] ?? 1);
+      input.dataset.setting = key;
+      input.setAttribute("aria-label", t(label));
+      const output = node("output");
+      output.textContent = formatSetting(key, Number(input.value));
+      input.addEventListener("input", () => {
+        output.textContent = formatSetting(key, Number(input.value));
+        controller.setSetting(key, Number(input.value));
+        if (key === "textSize") {
+          const preview = body.querySelector<HTMLElement>(".vega-shell__text-preview p");
+          if (preview) preview.style.fontSize = `${Number(input.value)}em`;
         }
       });
+      body.append(setting(label, input, output));
+    };
+    const toggle = (
+      key: "instantText" | "bgmEnabled" | "subtitlesEnabled" | "reducedMotion" | "highContrast",
+      label: string,
+    ) => {
+      const input = node("input");
+      input.type = "checkbox";
+      input.setAttribute("role", "switch");
+      input.dataset.setting = key;
+      input.checked = Boolean(snapshot.settings[key]);
+      input.addEventListener("change", () => controller.setSetting(key, input.checked));
+      body.append(setting(label, input));
+    };
+    categories.forEach(([key, label], index) => {
+      const tab = button(label, () => select(key));
+      tab.dataset.tab = key;
+      tab.id = `${id}-tab-${key}`;
+      tab.setAttribute("role", "tab");
+      tab.setAttribute("aria-controls", body.id);
+      tab.addEventListener("keydown", (event) => {
+        const target =
+          event.key === "ArrowRight"
+            ? (index + 1) % categories.length
+            : event.key === "ArrowLeft"
+              ? (index + categories.length - 1) % categories.length
+              : undefined;
+        if (target !== undefined) {
+          event.preventDefault();
+          select(categories[target]![0]);
+          (tabs.children[target] as HTMLElement).focus();
+        }
+      });
+      tabs.append(tab);
+    });
+    content.append(tabs, body);
+    select(settingsTab);
+  }
+  function renderSaves(content: HTMLElement, mode: "save" | "load") {
+    const toolbar = node("div", "vega-shell__save-toolbar"),
+      groups = node("div", "vega-shell__tabs");
+    groups.setAttribute("role", "tablist");
+    const grid = node("div", "vega-shell__saves"),
+      pagination = node("nav", "vega-shell__pagination");
+    pagination.setAttribute("aria-label", t("Save pages"));
+    const update = () => {
+      typography?.releaseWithin(grid);
+      typography?.releaseWithin(pagination);
+      grid.replaceChildren();
+      pagination.replaceChildren();
+      const reserved = snapshot.saves.filter((save) => save.slot === "quick" || save.slot.startsWith("auto"));
+      const slots =
+        saveGroup === "quick"
+          ? reserved.map((save) => save.slot)
+          : vegaShellSaveSlotNames(snapshot.saves).filter((slot) => slot !== "quick" && !slot.startsWith("auto"));
+      const pageCount = Math.max(1, Math.ceil(slots.length / 6));
+      page = Math.min(page, pageCount - 1);
+      for (const el of groups.querySelectorAll<HTMLButtonElement>("button"))
+        el.setAttribute("aria-selected", String(el.dataset.group === saveGroup));
+      for (const slot of slots.slice(page * 6, page * 6 + 6)) {
+        const save = snapshot.saves.find((save) => save.slot === slot),
+          card = node("article", `vega-shell__save-card ${save ? "is-occupied" : "is-empty"}`),
+          main = node("button", "vega-shell__save-main");
+        main.type = "button";
+        main.disabled = mode === "load" && !save;
+        main.setAttribute("aria-label", `${t(mode === "save" ? "Save" : "Load")} ${slot}`);
+        const head = node("header"),
+          ordinal = node("span", "vega-shell__slot-number");
+        ordinal.textContent = /^\d+$/u.test(slot)
+          ? String(Number(slot)).padStart(3, "0")
+          : slot === "quick"
+            ? "QUICK"
+            : slot;
+        const date = node("time");
+        date.textContent = save
+          ? new Intl.DateTimeFormat(shellUiLocale(snapshot.settings.uiLanguage, document), {
+              dateStyle: "short",
+              timeStyle: "short",
+            }).format(new Date(save.updatedAt))
+          : t("Empty slot");
+        head.append(ordinal, date);
+        const image = node("div", "vega-shell__save-preview");
+        if (save?.presentation?.previewImage) {
+          const img = node("img");
+          img.src = save.presentation.previewImage;
+          img.alt = "";
+          img.loading = "lazy";
+          image.append(img);
+        } else {
+          const mark = node("span");
+          mark.textContent = save ? "RECORD" : "NO DATA";
+          image.append(mark);
+        }
+        const caption = node("div", "vega-shell__save-caption");
+        caption.append(
+          text("strong", save?.label || save?.presentation?.speaker || t(save ? "Narration" : "Empty slot"), "", false),
+          text(
+            "p",
+            plain(
+              save?.presentation?.text ||
+                save?.narrative.backlog.at(-1)?.text ||
+                t(mode === "save" ? "Save here" : "No saved progress"),
+            ),
+            "",
+            false,
+          ),
+        );
+        main.append(head, image, caption);
+        main.addEventListener("click", () => {
+          if (mode === "load") {
+            confirm("Load this save? Current unsaved progress will be lost.", () => controller.load(slot));
+            return;
+          }
+          if (save) confirm("Overwrite this save?", () => controller.save(slot));
+          else void run(() => controller.save(slot));
+        });
+        card.append(main);
+        if (save) {
+          const remove = button("Delete", () => confirm("Delete this save?", () => controller.deleteSave(slot), true), {
+            className: "vega-shell__save-delete",
+            icon: "delete",
+          });
+          remove.setAttribute("aria-label", `${t("Delete")} ${slot}`);
+          card.append(remove);
+        }
+        grid.append(card);
+      }
+      if (!slots.length) grid.append(text("p", "No saved progress", "vega-shell__empty"));
+      const go = (next: number) => {
+        page = next;
+        update();
+      };
+      pagination.append(
+        button("‹", () => go(page - 1), {
+          disabled: page === 0,
+          translate: false,
+        }),
+      );
+      const visible = new Set([
+        0,
+        pageCount - 1,
+        ...Array.from({ length: 5 }, (_, i) => page - 2 + i).filter((i) => i >= 0 && i < pageCount),
+      ]);
+      let last = -1;
+      for (const index of [...visible].sort((a, b) => a - b)) {
+        if (index - last > 1) pagination.append(text("span", "…", "", false));
+        const b = button(String(index + 1), () => go(index), {
+          translate: false,
+        });
+        if (index === page) b.setAttribute("aria-current", "page");
+        pagination.append(b);
+        last = index;
+      }
+      pagination.append(
+        button("›", () => go(page + 1), {
+          disabled: page === pageCount - 1,
+          translate: false,
+        }),
+      );
+      paintText(grid);
+      paintText(pagination);
+    };
+    for (const [key, label] of [
+      ["manual", "Manual saves"],
+      ["quick", "Quick saves"],
+    ] as const) {
+      const tab = button(label, () => {
+        saveGroup = key;
+        page = 0;
+        update();
+      });
+      tab.dataset.group = key;
+      tab.setAttribute("role", "tab");
+      groups.append(tab);
     }
-  });
-  const onKeyDown = (event: KeyboardEvent): void => {
+    toolbar.append(
+      groups,
+      text(
+        "p",
+        mode === "save" ? "Choose a slot to save your progress." : "Choose a save to continue the story.",
+        "vega-shell__description",
+      ),
+    );
+    content.append(toolbar, grid, pagination);
+    update();
+  }
+  function renderBacklog(content: HTMLElement) {
+    const toolbar = node("div", "vega-shell__backlog-toolbar"),
+      search = node("input");
+    search.type = "search";
+    search.placeholder = t("Search dialogue");
+    search.setAttribute("aria-label", t("Search dialogue"));
+    search.value = query;
+    toolbar.append(search);
+    const entries = node("div", "vega-shell__backlog");
+    const update = () => {
+      typography?.releaseWithin(entries);
+      silence();
+      entries.replaceChildren();
+      const filtered = [...snapshot.backlog]
+        .reverse()
+        .filter((entry) =>
+          `${entry.speaker}\n${plain(entry.text)}`.toLocaleLowerCase().includes(query.toLocaleLowerCase()),
+        );
+      if (!filtered.length)
+        entries.append(
+          text("p", snapshot.backlog.length ? "No matching dialogue" : "The backlog is empty.", "vega-shell__empty"),
+        );
+      for (const entry of filtered) {
+        const row = node("article", "vega-shell__log-row"),
+          speaker = text("strong", entry.speaker || t("Narration"), "vega-shell__log-speaker", false),
+          body = node("div", "vega-shell__log-text");
+        renderRichText(document, body, entry.text);
+        const actions = node("div", "vega-shell__log-actions");
+        actions.append(
+          button("Return", () => controller.jumpToBacklog(entry.id), {
+            icon: "return",
+          }),
+        );
+        if (entry.voice) {
+          const audio = node("audio");
+          audio.preload = "none";
+          audio.src = entry.voice;
+          media.add(audio);
+          const play = button(
+            "Replay voice",
+            async () => {
+              for (const other of media) if (other !== audio) other.pause();
+              if (!audio.paused) {
+                audio.pause();
+                play.setAttribute("aria-pressed", "false");
+              } else {
+                audio.volume = snapshot.settings.masterVolume * snapshot.settings.voiceVolume;
+                await audio.play();
+                play.setAttribute("aria-pressed", "true");
+              }
+            },
+            { icon: "continue" },
+          );
+          audio.addEventListener("ended", () => play.setAttribute("aria-pressed", "false"));
+          actions.append(play, audio);
+        }
+        row.append(speaker, body, actions);
+        entries.append(row);
+      }
+      paintText(entries);
+    };
+    search.addEventListener("input", () => {
+      query = search.value;
+      update();
+    });
+    content.append(toolbar, entries);
+    update();
+  }
+  function renderGallery(content: HTMLElement) {
+    const tabs = node("div", "vega-shell__tabs"),
+      grid = node("div", "vega-shell__gallery");
+    let category = "cg";
+    const update = () => {
+      silence();
+      typography?.releaseWithin(grid);
+      grid.replaceChildren();
+      const entries = snapshot.gallery.filter((item) => item.kind === category);
+      for (const item of entries) {
+        const card = node("button", "vega-shell__gallery-card");
+        card.type = "button";
+        card.disabled = !item.unlocked;
+        const picture = node("div", "vega-shell__gallery-image");
+        if (item.unlocked && (item.thumbnail || (item.kind === "cg" && item.source))) {
+          const img = node("img");
+          img.src = (item.thumbnail || item.source)!;
+          img.alt = "";
+          img.loading = "lazy";
+          picture.append(img);
+        } else picture.append(createVegaShellIcon(document, item.unlocked ? "gallery" : "lock"));
+        card.append(picture, text("span", item.unlocked ? item.title : t("Locked"), "", false));
+        card.addEventListener("click", () => {
+          if (!item.source) return;
+          const viewer = node("div", "vega-shell__media-viewer"),
+            closeButton = button(
+              "Close",
+              () => {
+                silence();
+                viewer.remove();
+              },
+              { icon: "close" },
+            );
+          viewer.append(closeButton);
+          if (item.kind === "bgm") {
+            const audio = node("audio");
+            audio.src = item.source;
+            audio.controls = true;
+            media.add(audio);
+            viewer.append(text("h3", item.title, "", false), audio);
+            void audio.play().catch(() => {});
+          } else {
+            const img = node("img");
+            img.src = item.source;
+            img.alt = item.title;
+            viewer.append(img);
+          }
+          content.append(viewer);
+          closeButton.focus();
+        });
+        grid.append(card);
+      }
+      if (!entries.length) grid.append(text("p", "No gallery entries are configured.", "vega-shell__empty"));
+      for (const tab of tabs.querySelectorAll<HTMLElement>("button"))
+        tab.setAttribute("aria-selected", String(tab.dataset.category === category));
+      paintText(grid);
+    };
+    for (const [key, label] of [
+      ["cg", "Images"],
+      ["bgm", "Music"],
+    ] as const) {
+      const tab = button(label, () => {
+        category = key;
+        update();
+      });
+      tab.dataset.category = key;
+      tabs.append(tab);
+    }
+    content.append(tabs, grid);
+    update();
+  }
+  async function toggleFullscreen() {
+    if (document.fullscreenElement) await document.exitFullscreen();
+    else await context.root.requestFullscreen();
+  }
+  const restoreUi = () => delete context.root.dataset.vegaUiHidden;
+  function onKey(event: KeyboardEvent) {
     if (event.defaultPrevented) return;
-    const target = event.target;
-    const editing =
-      target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement;
-    if (latest.screen !== "game" && event.key === "Tab") {
-      const panel = root.querySelector<HTMLElement>(".vega-shell__panel");
-      if (panel) trapFocus(event, panel);
-    } else if (
-      latest.screen === "game" &&
-      (event.ctrlKey || event.metaKey) &&
-      event.key.toLowerCase() === "s"
-    ) {
-      event.preventDefault();
-      run(() => controller.quickSave());
-    } else if (!editing && event.key === "Escape") {
-      event.preventDefault();
-      if (latest.screen === "game") openScreen("menu");
-      else goBack();
-    } else if (
-      latest.screen === "game" &&
-      !editing &&
-      event.key.toLowerCase() === "a"
-    ) {
-      controller.toggleAuto();
-    }
-  };
-  const onPointerDown = (event: PointerEvent): void => {
-    const target = event.target;
-    if (
-      target instanceof Element &&
-      target.closest(
-        "button, input, select, textarea, a[href], audio, video, [contenteditable='true']",
-      )
-    ) {
+    const target = event.target as HTMLElement | null,
+      editing = Boolean(target?.closest('input,textarea,select,[contenteditable="true"]'));
+    if (snapshot.screen !== "game") {
+      if (root.querySelector(".vega-shell__confirmation")) return;
+      if (event.key === "Escape") {
+        event.preventDefault();
+        const viewer = root.querySelector(".vega-shell__media-viewer");
+        if (viewer) {
+          silence();
+          viewer.remove();
+        } else close();
+      } else if (event.key === "Tab") trapFocus(event, root.querySelector<HTMLElement>(".vega-shell__panel")!);
       return;
     }
-    context.root.focus({ preventScroll: true });
-  };
-  const onStorage = (event: StorageEvent): void => {
-    if (event.key !== VEGA_SHELL_COLOR_MODE_STORAGE_KEY) return;
-    const next = readVegaShellColorMode(storage);
-    if (next === colorMode) return;
-    colorMode = next;
-    applyVegaShellColorMode(context.root, next);
-    if (latest.screen === "settings") render();
-  };
-  let disposed = false;
-  function dispose(): void {
-    if (disposed) return;
-    disposed = true;
-    release(subscription);
-    context.root.removeEventListener("keydown", onKeyDown);
-    context.root.removeEventListener("pointerdown", onPointerDown);
-    view?.removeEventListener("storage", onStorage);
-    context.signal.removeEventListener("abort", dispose);
-    delete context.root.dataset.vegaColorMode;
-    setBackgroundInert(false);
-    if (originalTabIndex === null) context.root.removeAttribute("tabindex");
-    else context.root.setAttribute("tabindex", originalTabIndex);
-    host.classList.remove("vega-shell-host--active");
-    releaseStyle();
-    root.remove();
+    if (editing || event.altKey || event.repeat) return;
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
+      event.preventDefault();
+      void run(() => controller.quickSave());
+      return;
+    }
+    if (event.ctrlKey || event.metaKey) return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      restoreUi();
+      void open("menu");
+    } else if (event.key.toLowerCase() === "a") controller.toggleAuto();
+    else if (event.key.toLowerCase() === "h") {
+      if (context.root.dataset.vegaUiHidden) restoreUi();
+      else context.root.dataset.vegaUiHidden = "true";
+    } else if (event.key.toLowerCase() === "l") void open("backlog");
   }
-  context.root.addEventListener("keydown", onKeyDown);
-  context.root.addEventListener("pointerdown", onPointerDown);
-  view?.addEventListener("storage", onStorage);
-  context.signal.addEventListener("abort", dispose, { once: true });
-  if (!subscriptionEmitted) render();
-
-  return { dispose };
-};
-
-const focusableElements = (container: HTMLElement): HTMLElement[] =>
-  Array.from(
-    container.querySelectorAll<HTMLElement>(
-      "button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], audio[controls], video[controls], [tabindex]:not([tabindex='-1'])",
-    ),
-  ).filter(
-    (element) =>
-      !element.hidden &&
-      !element.closest("[hidden]") &&
-      element.getAttribute("aria-hidden") !== "true",
+  context.root.addEventListener("keydown", onKey, { signal: events.signal });
+  context.root.addEventListener(
+    "pointerdown",
+    (event) => {
+      if (context.root.dataset.vegaUiHidden) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        restoreUi();
+      }
+    },
+    { capture: true, signal: events.signal },
   );
-
-const trapFocus = (event: KeyboardEvent, container: HTMLElement): void => {
+  context.root.addEventListener(
+    "contextmenu",
+    (event) => {
+      if ((event.target as HTMLElement)?.closest("input,textarea,select")) return;
+      event.preventDefault();
+      if (snapshot.screen === "game") void open("menu");
+      else close();
+    },
+    { signal: events.signal },
+  );
+  let emitted = false;
+  const subscription = controller.subscribe((value) => {
+    emitted = true;
+    snapshot = value;
+    render();
+  });
+  if (!emitted) render();
+  return {
+    dispose() {
+      disposed = true;
+      events.abort();
+      release(subscription);
+      clearView();
+      typography?.dispose();
+      setInert(false);
+      host.classList.remove("vega-shell-host--active");
+      root.remove();
+      removeStyle();
+    },
+  };
+}
+function formatSetting(key: string, value: number): string {
+  return key.toLowerCase().includes("volume")
+    ? `${Math.round(value * 100)}%`
+    : key === "autoDelay"
+      ? `${value.toFixed(1)} s`
+      : `${value.toFixed(2).replace(/0$/u, "")}×`;
+}
+function trapFocus(event: KeyboardEvent, root: HTMLElement) {
   if (event.key !== "Tab") return;
-  const elements = focusableElements(container);
-  if (!elements.length) {
+  const elements = [
+    ...root.querySelectorAll<HTMLElement>(
+      'button:not(:disabled),input:not(:disabled),select:not(:disabled),a[href],[tabindex="0"]',
+    ),
+  ].filter((el) => el.getClientRects().length && !el.closest("[inert]"));
+  const first = elements[0],
+    last = elements.at(-1);
+  if (!first || !last) {
     event.preventDefault();
-    container.focus();
+    root.focus();
     return;
   }
-  const first = elements[0]!;
-  const last = elements.at(-1)!;
-  const active = container.ownerDocument.activeElement;
-  if (event.shiftKey && (active === first || !container.contains(active))) {
+  const active = root.ownerDocument.activeElement;
+  if (event.shiftKey && (active === first || !root.contains(active))) {
     event.preventDefault();
     last.focus();
-  } else if (!event.shiftKey && active === last) {
+  } else if (!event.shiftKey && (active === last || !root.contains(active))) {
     event.preventDefault();
     first.focus();
   }
-};
-
-const syncSnapshotControls = (
-  root: HTMLElement,
-  snapshot: VegaShellSnapshot,
-): boolean => {
-  if (snapshot.screen === "menu") {
-    root
-      .querySelector<HTMLElement>("[data-shell-toggle='auto']")
-      ?.setAttribute("aria-pressed", String(snapshot.autoPlay));
-    root
-      .querySelector<HTMLElement>("[data-shell-toggle='fast']")
-      ?.setAttribute("aria-pressed", String(snapshot.fastForward));
-    const quickLoad = root.querySelector<HTMLButtonElement>(
-      "[data-shell-action='quick-load']",
-    );
-    if (quickLoad) {
-      quickLoad.disabled = !snapshot.saves.some(({ slot }) => slot === "quick");
-    }
-    return true;
-  }
-  if (snapshot.screen !== "settings") return false;
-  for (const input of root.querySelectorAll<HTMLInputElement>(
-    "[data-shell-setting]",
-  )) {
-    const key = input.dataset.shellSetting as keyof typeof snapshot.settings;
-    const value = snapshot.settings[key];
-    if (input.type === "checkbox") input.checked = Boolean(value);
-    else input.value = String(value);
-  }
-  return true;
-};
-
-const renderScreen = (
-  document: Document,
-  panel: HTMLElement,
-  controller: VegaShellController,
-  snapshot: VegaShellSnapshot,
-  error: string,
-  run: (operation: () => void | Promise<void>) => void,
-  colorMode: VegaShellColorMode,
-  setColorMode: (mode: VegaShellColorMode) => void,
-  openScreen: (
-    screen: Exclude<VegaShellScreen, "game">,
-  ) => void,
-  goBack: () => void,
-  viewState: VegaShellViewState,
-): void => {
-  if (snapshot.screen === "menu") {
-    panel.classList.add("vega-shell__panel--quick");
-    const close = button(
-      document,
-      "Menu",
-      goBack,
-      "vega-shell__menu-toggle",
-      false,
-      undefined,
-      "chevron-up",
-    );
-    close.setAttribute("aria-label", "Close game menu");
-    panel.append(close);
-    renderMenu(document, panel, controller, snapshot, run, openScreen);
-    if (error) {
-      const errorElement = document.createElement("p");
-      errorElement.className = "vega-shell__error";
-      errorElement.setAttribute("role", "alert");
-      errorElement.textContent = error;
-      panel.append(errorElement);
-    }
-    return;
-  }
-
-  const header = document.createElement("header");
-  header.className = "vega-shell__header";
-  const headingWrap = document.createElement("div");
-  headingWrap.className = "vega-shell__heading";
-  const heading = document.createElement(snapshot.screen === "title" ? "h1" : "h2");
-  heading.id = "vega-shell-heading";
-  heading.textContent = snapshot.screen === "title" ? snapshot.title : labels[snapshot.screen];
-  headingWrap.append(heading);
-  header.append(headingWrap);
-  if (snapshot.screen !== "title") {
-    const close = button(document, "Close", goBack, "vega-shell__close", false, "close");
-    close.setAttribute("aria-label", `Close ${labels[snapshot.screen]}`);
-    header.append(close);
-  }
-  panel.append(header);
-
-  const content = document.createElement("main");
-  content.className = "vega-shell__content";
-  panel.append(content);
-
-  const errorElement = document.createElement("p");
-  errorElement.className = "vega-shell__error";
-  errorElement.setAttribute("role", "alert");
-  errorElement.textContent = error;
-
-  if (snapshot.screen === "title") {
-    renderTitle(document, content, controller, snapshot, run, openScreen);
-  }
-  else if (snapshot.screen === "settings") {
-    renderSettings(document, content, controller, snapshot, colorMode, setColorMode);
-  }
-  else if (snapshot.screen === "save" || snapshot.screen === "load") {
-    renderSaves(document, content, controller, snapshot, snapshot.screen, run, openScreen, viewState);
-  } else if (snapshot.screen === "backlog") renderBacklog(document, content, controller, snapshot, run);
-  else if (snapshot.screen === "gallery") renderGallery(document, content, snapshot);
-  else if (snapshot.screen === "flowchart") renderFlow(document, content, controller, snapshot, run);
-  panel.append(errorElement);
-  if (
-    snapshot.screen !== "title" &&
-    (snapshot.navigationOrigin ?? "game") === "game"
-  ) {
-    panel.append(
-      renderNavigation(document, snapshot.screen, openScreen, goBack),
-    );
-  }
-};
-
-const renderTitle = (
-  document: Document,
-  panel: HTMLElement,
-  controller: VegaShellController,
-  snapshot: VegaShellSnapshot,
-  run: (operation: () => void | Promise<void>) => void,
-  openScreen: (screen: Exclude<VegaShellScreen, "game">) => void,
-): void => {
-  const actions = list(document);
-  actions.append(
-    button(document, "Start", () => run(() => controller.start()), "vega-shell__primary", false, "start"),
-    button(document, "Continue", () => run(() => controller.continue()), "", !snapshot.canContinue, "continue"),
-    button(document, "Load", () => openScreen("load"), "", false, "load"),
-    button(document, "Settings", () => openScreen("settings"), "", false, "settings"),
-    button(document, "Extra", () => openScreen("gallery"), "", false, "gallery"),
-    button(
-      document,
-      "Exit",
-      () =>
-        showPanelConfirmation(
-          document,
-          panel,
-          "Exit this game?",
-          "Exit",
-          () => run(() => controller.exit()),
-          true,
-        ),
-      "",
-      false,
-      "exit",
-    ),
-  );
-  panel.append(actions);
-};
-
-const renderMenu = (
-  document: Document,
-  panel: HTMLElement,
-  controller: VegaShellController,
-  snapshot: VegaShellSnapshot,
-  run: (operation: () => void | Promise<void>) => void,
-  openScreen: (screen: Exclude<VegaShellScreen, "game">) => void,
-): void => {
-  const actions = list(document);
-  actions.classList.add("vega-shell__quick-actions");
-  const auto = button(document, "Auto play", () => controller.toggleAuto(), "", false, "auto");
-  auto.dataset.shellToggle = "auto";
-  auto.setAttribute("aria-pressed", String(snapshot.autoPlay));
-  const fast = button(document, "Fast forward", () => controller.toggleFastForward(), "", false, "speed");
-  fast.dataset.shellToggle = "fast";
-  fast.setAttribute("aria-pressed", String(snapshot.fastForward));
-  const quickLoad = button(
-    document,
-    "Quick load",
-    () => run(() => controller.quickLoad()),
-    "",
-    !snapshot.saves.some(({ slot }) => slot === "quick"),
-    "load",
-  );
-  quickLoad.dataset.shellAction = "quick-load";
-  actions.append(
-    auto,
-    fast,
-    button(document, "Quick save", () => run(() => controller.quickSave()), "", false, "save"),
-    quickLoad,
-    button(document, "Backlog", () => openScreen("backlog"), "", false, "backlog"),
-    button(document, "Save / Load", () => openScreen("save"), "", false, "save"),
-    button(document, "Flowchart", () => openScreen("flowchart"), "", false, "flowchart"),
-    button(document, "Settings", () => openScreen("settings"), "", false, "settings"),
-    button(document, "Fullscreen", () => run(() => toggleFullscreen(panel)), "", false, "fullscreen"),
-  );
-  if (controller.returnToTitle) {
-    actions.append(
-      button(
-        document,
-        "Return to title",
-        () =>
-          showPanelConfirmation(
-            document,
-            panel,
-            "Return to the title screen? Unsaved progress will be lost.",
-            "Return to title",
-            () => run(() => controller.returnToTitle?.()),
-          ),
-        "",
-        false,
-        "return",
-      ),
-    );
-  }
-  panel.append(actions);
-};
-
-const renderSettings = (
-  document: Document,
-  panel: HTMLElement,
-  controller: VegaShellController,
-  snapshot: VegaShellSnapshot,
-  colorMode: VegaShellColorMode,
-  setColorMode: (mode: VegaShellColorMode) => void,
-): void => {
-  const theme = document.createElement("select");
-  theme.setAttribute("aria-label", "Appearance");
-  for (const [value, label] of [
-    ["light", "Light"],
-    ["system", "System"],
-    ["dark", "Dark"],
-  ] as const) {
-    const option = document.createElement("option");
-    option.value = value;
-    option.textContent = label;
-    option.selected = value === colorMode;
-    theme.append(option);
-  }
-  theme.addEventListener("change", () => setColorMode(theme.value as VegaShellColorMode));
-  panel.append(row(document, "Appearance", theme));
-
-  const fields: Array<[keyof typeof snapshot.settings, string, number, number, number]> = [
-    ["textSpeed", "Text speed", 0.1, 5, 0.1],
-    ["autoDelay", "Auto delay", 0, 10, 0.1],
-    ["masterVolume", "Master volume", 0, 1, 0.05],
-    ["bgmVolume", "Music volume", 0, 1, 0.05],
-    ["voiceVolume", "Voice volume", 0, 1, 0.05],
-    ["seVolume", "Effects volume", 0, 1, 0.05],
-  ];
-  for (const [key, label, minimum, maximum, step] of fields) {
-    const input = document.createElement("input");
-    input.type = "range";
-    input.min = String(minimum);
-    input.max = String(maximum);
-    input.step = String(step);
-    input.value = String(snapshot.settings[key]);
-    input.dataset.shellSetting = key;
-    input.setAttribute("aria-label", label);
-    input.addEventListener("input", () => controller.setSetting(key, Number(input.value) as never));
-    panel.append(row(document, label, input));
-  }
-  for (const [key, label] of [
-    ["reducedMotion", "Reduce motion"],
-    ["highContrast", "High contrast"],
-  ] as const) {
-    const input = document.createElement("input");
-    input.type = "checkbox";
-    input.checked = snapshot.settings[key];
-    input.dataset.shellSetting = key;
-    input.addEventListener("change", () => controller.setSetting(key, input.checked));
-    panel.append(row(document, label, input));
-  }
-};
-
-const renderSaves = (
-  document: Document,
-  panel: HTMLElement,
-  controller: VegaShellController,
-  snapshot: VegaShellSnapshot,
-  mode: "save" | "load",
-  run: (operation: () => void | Promise<void>) => void,
-  openScreen: (
-    screen: Exclude<VegaShellScreen, "game">,
-  ) => void,
-  viewState: VegaShellViewState,
-): void => {
-  const toolbar = document.createElement("div");
-  toolbar.className = "vega-shell__save-toolbar";
-  const modeSwitch = document.createElement("div");
-  modeSwitch.className = "vega-shell__save-mode";
-  modeSwitch.setAttribute("role", "group");
-  modeSwitch.setAttribute("aria-label", "Save data mode");
-  if ((snapshot.navigationOrigin ?? "game") === "game") {
-    for (const nextMode of ["save", "load"] as const) {
-      const modeButton = button(
-        document,
-        nextMode === "save" ? "Save" : "Load",
-        () => openScreen(nextMode),
-        "",
-        false,
-        nextMode,
-      );
-      modeButton.setAttribute("aria-pressed", String(mode === nextMode));
-      modeSwitch.append(modeButton);
-    }
-    toolbar.append(modeSwitch);
-  }
-
-  const saves = document.createElement("div");
-  saves.className = "vega-shell__saves";
-  const slots = new Map(snapshot.saves.map((save) => [save.slot, save]));
-  const slotNames = vegaShellSaveSlotNames(snapshot.saves);
-  const initialPage = vegaShellSavePage(slotNames, viewState.savePage);
-  const pages = initialPage.pageCount;
-  const pageButtons: HTMLButtonElement[] = [];
-  let activePage = initialPage.page;
-  const selectPage = (page: number): void => {
-    activePage = Math.min(pages - 1, Math.max(0, page));
-    viewState.savePage = activePage;
-    pageButtons.forEach((pageButton, index) => {
-      if (index === activePage) pageButton.setAttribute("aria-current", "page");
-      else pageButton.removeAttribute("aria-current");
-    });
-    renderSavePage();
-  };
-  const pagination = document.createElement("nav");
-  pagination.className = "vega-shell__save-pagination";
-  pagination.setAttribute("aria-label", "Save pages");
-  for (let page = 0; page < pages; page += 1) {
-    const pageButton = button(document, String(page + 1), () => selectPage(page));
-    pageButton.setAttribute("aria-label", `Save page ${page + 1}`);
-    pageButtons.push(pageButton);
-    pagination.append(pageButton);
-  }
-  toolbar.append(pagination);
-
-  function renderSavePage(): void {
-    saves.replaceChildren();
-    for (const slot of vegaShellSavePage(slotNames, activePage).slots) {
-      saves.append(
-        renderSaveCard(
-          document,
-          panel,
-          controller,
-          slots.get(slot),
-          slot,
-          mode,
-          run,
-        ),
-      );
-    }
-  }
-  selectPage(activePage);
-  panel.append(toolbar, saves);
-};
-
-const renderSaveCard = (
-  document: Document,
-  panel: HTMLElement,
-  controller: VegaShellController,
-  save: VegaShellSnapshot["saves"][number] | undefined,
-  slot: string,
-  mode: "save" | "load",
-  run: (operation: () => void | Promise<void>) => void,
-): HTMLElement => {
-  const card = document.createElement("article");
-  card.className = `vega-shell__save ${save ? "is-occupied" : "is-empty"}`;
-  const cardHeader = document.createElement("header");
-  const slotLabel = document.createElement("strong");
-  slotLabel.textContent = save?.label || `Slot ${slot}`;
-  const date = document.createElement("time");
-  date.textContent = save ? formatSaveDate(save.updatedAt) : "Empty";
-  if (save) date.dateTime = save.updatedAt;
-  cardHeader.append(slotLabel, date);
-
-  const preview = document.createElement("div");
-  preview.className = "vega-shell__save-preview";
-  const presentation = readSavePresentation(save);
-  const previewSource = save
-    ? presentation.previewImage || savePreviewSource(save.player.stage)
-    : null;
-  if (previewSource) {
-    const image = document.createElement("img");
-    image.src = previewSource;
-    image.alt = "";
-    image.loading = "lazy";
-    preview.append(image);
-  } else {
-    preview.append(createVegaShellIcon(document, save ? "gallery" : "save"));
-  }
-
-  const dialogue = save?.narrative.backlog.at(-1);
-  const savedSpeaker = presentation.speaker || dialogue?.speaker;
-  const savedText = presentation.text || dialogue?.text;
-  const details = document.createElement("div");
-  details.className = "vega-shell__save-details";
-  const speaker = document.createElement("strong");
-  speaker.textContent = savedSpeaker || (save ? "Narration" : "Unused slot");
-  const text = document.createElement("p");
-  text.textContent = savedText || (save ? "No dialogue snapshot" : "Save here to create a checkpoint.");
-  details.append(speaker, text);
-
-  const footer = document.createElement("footer");
-  const primaryLabel = mode === "load" ? "Load" : save ? "Overwrite" : "Save";
-  const item = button(
-    document,
-    primaryLabel,
-    () => {
-      if (mode === "load") {
-        run(() => controller.load(slot));
-        return;
-      }
-      if (save) {
-        showPanelConfirmation(
-          document,
-          panel,
-          `Overwrite ${save.label || `slot ${slot}`}?`,
-          "Overwrite",
-          () => run(() => controller.save(slot)),
-        );
-        return;
-      }
-      run(() => controller.save(slot));
-    },
-    "vega-shell__save-primary",
-    mode === "load" && !save,
-    mode === "save" ? "save" : "load",
-  );
-  item.setAttribute("aria-label", `${primaryLabel} slot ${slot}`);
-  footer.append(item);
-  if (save) {
-    const remove = button(
-      document,
-      "Delete",
-      () => showPanelConfirmation(
-        document,
-        panel,
-        `Delete ${save.label || `slot ${slot}`}?`,
-        "Delete",
-        () => run(() => controller.deleteSave(slot)),
-        true,
-      ),
-      "vega-shell__delete",
-      false,
-      "delete",
-    );
-    remove.setAttribute("aria-label", `Delete ${save.label || `slot ${slot}`}`);
-    footer.append(remove);
-  }
-  card.append(cardHeader, preview, details, footer);
-  return card;
-};
-
-const formatSaveDate = (value: string): string => {
-  const date = new Date(value);
-  if (Number.isNaN(date.valueOf())) return value;
-  return new Intl.DateTimeFormat(undefined, {
-    dateStyle: "medium",
-    timeStyle: "short",
-  }).format(date);
-};
-
-const savePreviewSource = (stage: unknown): string | null => {
-  const stageRecord = objectRecord(stage);
-  const background = objectRecord(stageRecord?.background);
-  for (const candidate of [background?.url, background?.source]) {
-    if (typeof candidate === "string" && candidate.trim()) return candidate;
-  }
-  return null;
-};
-
-interface SavePresentationView {
-  readonly speaker?: string;
-  readonly text?: string;
-  readonly previewImage?: string;
 }
-
-const readSavePresentation = (save: unknown): SavePresentationView => {
-  const presentation = objectRecord(objectRecord(save)?.presentation);
-  if (!presentation) return {};
-  const speaker = nonEmptyString(presentation.speaker);
-  const text = nonEmptyString(presentation.text);
-  const previewImage = nonEmptyString(presentation.previewImage);
-  return {
-    ...(speaker ? { speaker } : {}),
-    ...(text ? { text } : {}),
-    ...(previewImage ? { previewImage } : {}),
-  };
-};
-
-const nonEmptyString = (value: unknown): string | null =>
-  typeof value === "string" && value.trim() ? value : null;
-
-const objectRecord = (value: unknown): Record<string, unknown> | null =>
-  typeof value === "object" && value !== null && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : null;
-
-const showPanelConfirmation = (
-  document: Document,
-  panel: HTMLElement,
-  message: string,
-  confirmLabel: string,
-  action: () => void,
-  dangerous = false,
-): void => {
-  panel
-    .querySelector<HTMLButtonElement>(".vega-shell__confirmation button")
-    ?.click();
-  const previousFocus = document.activeElement;
-  const confirmation = document.createElement("section");
-  confirmation.className = "vega-shell__confirmation";
-  confirmation.setAttribute("role", "alertdialog");
-  confirmation.setAttribute("aria-modal", "true");
-  const heading = document.createElement("h3");
-  const headingId = `vega-shell-confirmation-${shellDialogSerial++}`;
-  heading.id = headingId;
-  heading.textContent = message;
-  confirmation.setAttribute("aria-labelledby", headingId);
-  const background = Array.from(panel.children).map(
-    (element) => [element as HTMLElement, (element as HTMLElement).inert] as const,
-  );
-  for (const [element] of background) element.inert = true;
-  const restoreBackground = (): void => {
-    for (const [element, previous] of background) element.inert = previous;
-  };
-  const close = (): void => {
-    restoreBackground();
-    confirmation.remove();
-    if (previousFocus instanceof HTMLElement) previousFocus.focus();
-  };
-  const actions = document.createElement("div");
-  const cancel = button(document, "Cancel", close);
-  const confirm = button(
-    document,
-    confirmLabel,
-    () => {
-      restoreBackground();
-      confirmation.remove();
-      action();
-    },
-    dangerous ? "vega-shell__danger" : "vega-shell__primary",
-    false,
-    dangerous ? "exit" : "return",
-  );
-  actions.append(cancel, confirm);
-  confirmation.append(heading, actions);
-  confirmation.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") {
-      event.preventDefault();
-      event.stopPropagation();
-      close();
-      return;
-    }
-    trapFocus(event, confirmation);
-  });
-  panel.append(confirmation);
-  confirm.focus();
-};
-
-const renderBacklog = (
-  document: Document,
-  panel: HTMLElement,
-  controller: VegaShellController,
-  snapshot: VegaShellSnapshot,
-  run: (operation: () => void | Promise<void>) => void,
-): void => {
-  if (!snapshot.backlog.length) return panel.append(empty(document, "The backlog is empty."));
-  const entries = list(document);
-  entries.classList.add("vega-shell__backlog");
-  for (const entry of [...snapshot.backlog].reverse()) {
-    const card = document.createElement("article");
-    card.className = "vega-shell__backlog-entry";
-    const dialogue = document.createElement("div");
-    dialogue.className = "vega-shell__backlog-dialogue";
-    if (entry.speaker) {
-      const speaker = document.createElement("strong");
-      speaker.textContent = entry.speaker;
-      dialogue.append(speaker);
-    }
-    const text = document.createElement("p");
-    text.textContent = entry.text;
-    dialogue.append(text);
-    const jump = button(
-      document,
-      "Return",
-      () => run(() => controller.jumpToBacklog(entry.id)),
-      "vega-shell__backlog-return",
-      false,
-      "return",
-    );
-    jump.setAttribute(
-      "aria-label",
-      `Return to ${entry.speaker ? `${entry.speaker}'s dialogue` : "this dialogue"}`,
-    );
-    card.append(dialogue, jump);
-    if (entry.voice) {
-      const voice = document.createElement("audio");
-      voice.controls = true;
-      voice.preload = "none";
-      voice.src = entry.voice;
-      voice.setAttribute("aria-label", `Replay ${entry.speaker || "dialogue"} voice`);
-      card.append(voice);
-    }
-    entries.append(card);
-  }
-  panel.append(entries);
-};
-
-const renderGallery = (document: Document, panel: HTMLElement, snapshot: VegaShellSnapshot): void => {
-  if (!snapshot.gallery.length) return panel.append(empty(document, "No gallery entries are configured."));
-  const viewer = document.createElement("div");
-  viewer.className = "vega-shell__gallery-viewer";
-  viewer.hidden = true;
-  viewer.setAttribute("role", "region");
-  const viewerImage = document.createElement("img");
-  const viewerTitle = document.createElement("strong");
-  const viewerTitleId = `vega-shell-gallery-title-${shellDialogSerial++}`;
-  viewerTitle.id = viewerTitleId;
-  viewer.setAttribute("aria-labelledby", viewerTitleId);
-  let galleryTrigger: HTMLElement | null = null;
-  const closeViewer = (): void => {
-    viewer.hidden = true;
-    viewerImage.removeAttribute("src");
-    galleryTrigger?.focus();
-  };
-  const viewerClose = button(document, "Close", closeViewer, "", false, "close");
-  viewer.addEventListener("keydown", (event) => {
-    if (event.key !== "Escape") return;
-    event.preventDefault();
-    event.stopPropagation();
-    closeViewer();
-  });
-  viewer.append(viewerImage, viewerTitle, viewerClose);
-
-  const gallery = document.createElement("div");
-  gallery.className = "vega-shell__gallery";
-  for (const item of snapshot.gallery) {
-    const card = document.createElement("article");
-    card.className = "vega-shell__gallery-item";
-    if (item.kind === "cg") {
-      const open = button(
-        document,
-        item.unlocked ? item.title : "Locked",
-        () => {
-          if (!item.source) return;
-          viewerImage.src = item.source;
-          viewerImage.alt = item.title;
-          viewerTitle.textContent = item.title;
-          galleryTrigger = open;
-          viewer.hidden = false;
-          viewer.scrollIntoView({ block: "nearest" });
-          viewerClose.focus();
-        },
-        "vega-shell__gallery-open",
-        !item.unlocked || !item.source,
-      );
-      if (item.unlocked && item.thumbnail) {
-        const thumbnail = document.createElement("img");
-        thumbnail.src = item.thumbnail;
-        thumbnail.alt = "";
-        thumbnail.loading = "lazy";
-        open.prepend(thumbnail);
-      }
-      card.append(open);
-    } else {
-      const title = document.createElement("strong");
-      title.textContent = item.unlocked ? item.title : "Locked";
-      card.append(title);
-      if (item.unlocked && item.source) {
-        const audio = document.createElement("audio");
-        audio.controls = true;
-        audio.preload = "none";
-        audio.src = item.source;
-        audio.setAttribute("aria-label", `Play ${item.title}`);
-        card.append(audio);
+function renderRichText(document: Document, root: HTMLElement, source: string) {
+  const append = (parent: HTMLElement, nodes: readonly AdvRichTextNode[]) => {
+    for (const value of nodes) {
+      if (value.type === "text") parent.append(document.createTextNode(value.value));
+      else if (value.type === "break") parent.append(document.createElement("br"));
+      else if (value.type === "ruby") {
+        const ruby = document.createElement("ruby"),
+          rt = document.createElement("rt");
+        ruby.append(document.createTextNode(value.base));
+        rt.textContent = value.annotation;
+        ruby.append(rt);
+        parent.append(ruby);
+      } else if (value.type === "space") {
+        const space = document.createElement("span");
+        space.style.display = "inline-block";
+        space.style.width = `${value.value}${value.unit}`;
+        parent.append(space);
+      } else {
+        const span = document.createElement("span");
+        if (value.type === "size") span.style.fontSize = `${value.percent}%`;
+        else Object.assign(span.style, value.style);
+        append(span, value.children);
+        parent.append(span);
       }
     }
-    gallery.append(card);
-  }
-  panel.append(viewer, gallery);
-};
-
-const renderFlow = (
-  document: Document,
-  panel: HTMLElement,
-  controller: VegaShellController,
-  snapshot: VegaShellSnapshot,
-  run: (operation: () => void | Promise<void>) => void,
-): void => {
-  if (!snapshot.flow.length) return panel.append(empty(document, "No flow nodes are configured."));
-  const layout = layoutVegaShellFlow(snapshot.flow, snapshot.flowEdges);
-  const toolbar = document.createElement("div");
-  toolbar.className = "vega-shell__flow-toolbar";
-  const instructions = document.createElement("p");
-  instructions.textContent = "Drag to pan. Select an unlocked node to continue from it.";
-  const controls = document.createElement("div");
-  controls.setAttribute("role", "group");
-  controls.setAttribute("aria-label", "Flowchart zoom");
-  const zoomLabel = document.createElement("output");
-  zoomLabel.setAttribute("aria-live", "polite");
-  const zoomOut = button(document, "Zoom out", () => setZoom(zoom - 0.15), "", false, "zoom-out");
-  const fit = button(document, "Fit", () => {
-    const horizontal = viewport.clientWidth / layout.width;
-    const vertical = viewport.clientHeight / layout.height;
-    setZoom(Math.min(1.25, horizontal, vertical));
-    viewport.scrollTo({ left: 0, top: 0 });
-  }, "", false, "fit");
-  const zoomIn = button(document, "Zoom in", () => setZoom(zoom + 0.15), "", false, "zoom-in");
-  controls.append(zoomOut, zoomLabel, fit, zoomIn);
-  toolbar.append(instructions, controls);
-
-  const viewport = document.createElement("div");
-  viewport.className = "vega-shell__flow-viewport";
-  viewport.tabIndex = 0;
-  viewport.setAttribute("role", "region");
-  viewport.setAttribute("aria-label", "Interactive story flowchart");
-  const scaledStage = document.createElement("div");
-  scaledStage.className = "vega-shell__flow-scaled-stage";
-  const graph = document.createElement("div");
-  graph.className = "vega-shell__flow-graph";
-  graph.style.width = `${layout.width}px`;
-  graph.style.height = `${layout.height}px`;
-
-  const edges = document.createElementNS(SVG_NAMESPACE, "svg");
-  edges.classList.add("vega-shell__flow-lines");
-  edges.setAttribute("width", String(layout.width));
-  edges.setAttribute("height", String(layout.height));
-  edges.setAttribute("viewBox", `0 0 ${layout.width} ${layout.height}`);
-  edges.setAttribute("aria-hidden", "true");
-  const markerId = `vega-flow-arrow-${flowMarkerSerial}`;
-  flowMarkerSerial += 1;
-  const definitions = document.createElementNS(SVG_NAMESPACE, "defs");
-  const marker = document.createElementNS(SVG_NAMESPACE, "marker");
-  marker.id = markerId;
-  marker.setAttribute("viewBox", "0 0 10 10");
-  marker.setAttribute("refX", "9");
-  marker.setAttribute("refY", "5");
-  marker.setAttribute("markerWidth", "7");
-  marker.setAttribute("markerHeight", "7");
-  marker.setAttribute("orient", "auto-start-reverse");
-  const arrow = document.createElementNS(SVG_NAMESPACE, "path");
-  arrow.setAttribute("d", "M 0 0 L 10 5 L 0 10 z");
-  marker.append(arrow);
-  definitions.append(marker);
-  edges.append(definitions);
-  for (const edge of layout.edges) {
-    const path = document.createElementNS(SVG_NAMESPACE, "path");
-    const edgeState = flowEdgeState(edge);
-    path.classList.add("vega-shell__flow-line", `is-${edgeState}`);
-    path.dataset.kind = edge.kind;
-    path.setAttribute("d", vegaFlowEdgePath(edge));
-    path.setAttribute("marker-end", `url(#${markerId})`);
-    edges.append(path);
-    if (edge.condition && edgeState !== "locked") {
-      const label = document.createElement("span");
-      label.className = `vega-shell__flow-edge-label is-${edgeState}`;
-      label.textContent = edge.condition;
-      label.style.left = `${(edge.source.x + edge.target.x + edge.source.width) / 2}px`;
-      label.style.top = `${(edge.source.y + edge.source.height + edge.target.y) / 2}px`;
-      graph.append(label);
-    }
-  }
-  graph.prepend(edges);
-
-  let currentNodeElement: HTMLButtonElement | null = null;
-  for (const node of layout.nodes) {
-    const status = node.visited
-      ? node.current
-        ? "current"
-        : "visited"
-      : "locked";
-    const visibleLabel = node.visited ? node.label : "Locked";
-    const nodeButton = button(
-      document,
-      visibleLabel,
-      () => run(() => controller.jumpToFlowNode(node.id)),
-      `vega-shell__flow-node is-${status}`,
-      !node.visited,
-      node.visited ? "flowchart" : "lock",
-    );
-    nodeButton.dataset.nodeId = node.id;
-    nodeButton.style.left = `${node.x}px`;
-    nodeButton.style.top = `${node.y}px`;
-    nodeButton.style.width = `${node.width}px`;
-    nodeButton.style.height = `${node.height}px`;
-    nodeButton.setAttribute(
-      "aria-label",
-      node.visited ? `${node.label}, ${status}` : "Locked story route",
-    );
-    const statusLabel = document.createElement("span");
-    statusLabel.className = "vega-shell__flow-node-status";
-    statusLabel.textContent = status === "current"
-      ? "Current"
-      : status === "visited"
-        ? "Visited"
-        : "Locked";
-    nodeButton.append(statusLabel);
-    graph.append(nodeButton);
-    if (node.current) currentNodeElement = nodeButton;
-  }
-  scaledStage.append(graph);
-  viewport.append(scaledStage);
-
-  let zoom = 1;
-  function setZoom(value: number): void {
-    const next = Math.min(1.8, Math.max(0.15, Number.isFinite(value) ? value : 1));
-    const previous = zoom;
-    const centerX = (viewport.scrollLeft + viewport.clientWidth / 2) / previous;
-    const centerY = (viewport.scrollTop + viewport.clientHeight / 2) / previous;
-    zoom = next;
-    graph.style.transform = `scale(${zoom})`;
-    scaledStage.style.width = `${layout.width * zoom}px`;
-    scaledStage.style.height = `${layout.height * zoom}px`;
-    zoomLabel.value = `${Math.round(zoom * 100)}%`;
-    viewport.scrollLeft = centerX * zoom - viewport.clientWidth / 2;
-    viewport.scrollTop = centerY * zoom - viewport.clientHeight / 2;
-  }
-  setZoom(1);
-
-  let pointerId: number | null = null;
-  let pointerStartX = 0;
-  let pointerStartY = 0;
-  let scrollStartX = 0;
-  let scrollStartY = 0;
-  viewport.addEventListener("pointerdown", (event) => {
-    if (event.button !== 0 || (event.target as Element).closest("button")) return;
-    pointerId = event.pointerId;
-    pointerStartX = event.clientX;
-    pointerStartY = event.clientY;
-    scrollStartX = viewport.scrollLeft;
-    scrollStartY = viewport.scrollTop;
-    viewport.setPointerCapture(event.pointerId);
-    viewport.classList.add("is-panning");
-  });
-  viewport.addEventListener("pointermove", (event) => {
-    if (pointerId !== event.pointerId) return;
-    event.preventDefault();
-    viewport.scrollLeft = scrollStartX - (event.clientX - pointerStartX);
-    viewport.scrollTop = scrollStartY - (event.clientY - pointerStartY);
-  });
-  const finishPan = (event: PointerEvent): void => {
-    if (pointerId !== event.pointerId) return;
-    pointerId = null;
-    viewport.classList.remove("is-panning");
   };
-  viewport.addEventListener("pointerup", finishPan);
-  viewport.addEventListener("pointercancel", finishPan);
-  viewport.addEventListener("wheel", (event) => {
-    if (!event.ctrlKey && !event.metaKey) return;
-    event.preventDefault();
-    setZoom(zoom + (event.deltaY < 0 ? 0.1 : -0.1));
-  }, { passive: false });
-  queueMicrotask(() => {
-    if (!currentNodeElement) return;
-    const nodeX = currentNodeElement.offsetLeft + currentNodeElement.offsetWidth / 2;
-    const nodeY = currentNodeElement.offsetTop + currentNodeElement.offsetHeight / 2;
-    viewport.scrollLeft = nodeX * zoom - viewport.clientWidth / 2;
-    viewport.scrollTop = nodeY * zoom - viewport.clientHeight / 2;
-  });
-
-  panel.append(toolbar, viewport);
-};
-
-const flowEdgeState = (edge: VegaFlowLayoutEdge): "current" | "visited" | "locked" => {
-  if (edge.target.current && edge.source.visited) return "current";
-  if (edge.source.visited && edge.target.visited) return "visited";
-  return "locked";
-};
-
-const renderNavigation = (
-  document: Document,
-  current: VegaShellScreen,
-  openScreen: (
-    screen: Exclude<VegaShellScreen, "game">,
-  ) => void,
-  goBack: () => void,
-): HTMLElement => {
-  const navigation = document.createElement("nav");
-  navigation.className = "vega-shell__navigation";
-  navigation.setAttribute("aria-label", "Game menu pages");
-  const pages: readonly [VegaShellScreen, string, VegaShellIconName][] = [
-    ["flowchart", "Flowchart", "flowchart"],
-    ["save", "Save", "save"],
-    ["load", "Load", "load"],
-    ["backlog", "Log", "backlog"],
-    ["settings", "Settings", "settings"],
-  ];
-  for (const [screen, label, icon] of pages) {
-    const item = button(
-      document,
-      label,
-      () => openScreen(screen as Exclude<VegaShellScreen, "game">),
-      "",
-      false,
-      icon,
-    );
-    if (screen === current) item.setAttribute("aria-current", "page");
-    navigation.append(item);
-  }
-  const returnToGame = button(
-    document,
-    "Back",
-    goBack,
-    "vega-shell__navigation-return",
-    false,
-    "continue",
-  );
-  navigation.append(returnToGame);
-  return navigation;
-};
-
-const toggleFullscreen = async (panel: HTMLElement): Promise<void> => {
-  const document = panel.ownerDocument;
-  if (document.fullscreenElement) {
-    await document.exitFullscreen();
-    return;
-  }
-  const player = panel.closest<HTMLElement>(".vega-player") ?? document.documentElement;
-  await player.requestFullscreen();
-};
-
-const button = (
-  document: Document,
-  label: string,
-  action: () => void,
-  className = "",
-  disabled = false,
-  icon?: VegaShellIconName,
-  trailingIcon?: VegaShellIconName,
-): HTMLButtonElement => {
-  const element = document.createElement("button");
-  element.type = "button";
-  element.className = className;
-  element.disabled = disabled;
-  if (icon) element.append(createVegaShellIcon(document, icon));
-  const text = document.createElement("span");
-  text.className = "vega-shell__button-label";
-  text.textContent = label;
-  element.append(text);
-  if (trailingIcon) {
-    const trailing = createVegaShellIcon(document, trailingIcon);
-    trailing.classList.add("vega-shell-icon--trailing");
-    element.append(trailing);
-  }
-  element.addEventListener("click", action);
-  return element;
-};
-
-const list = (document: Document): HTMLDivElement => {
-  const element = document.createElement("div");
-  element.className = "vega-shell__actions";
-  return element;
-};
-
-const row = (document: Document, label: string, control: HTMLElement): HTMLLabelElement => {
-  const element = document.createElement("label");
-  element.className = "vega-shell__row";
-  const text = document.createElement("span");
-  text.textContent = label;
-  element.append(text, control);
-  return element;
-};
-
-const empty = (document: Document, text: string): HTMLParagraphElement => {
-  const element = document.createElement("p");
-  element.className = "vega-shell__empty";
-  element.textContent = text;
-  return element;
-};
-
-const release = (disposable: VegaDisposable): void => {
-  if (typeof disposable === "function") void disposable();
-  else if ("dispose" in disposable) void disposable.dispose();
-  else if ("destroy" in disposable) void disposable.destroy();
-  else void disposable.close();
-};
-
-const safeLocalStorage = (view: Window | null): Storage | null => {
-  try {
-    return view?.localStorage ?? null;
-  } catch {
-    return null;
-  }
-};
-
-const installShellStyle = (document: Document): (() => void) => {
-  try {
-    const view = document.defaultView as (Window & { CSSStyleSheet?: typeof CSSStyleSheet }) | null;
-    const Constructor = view?.CSSStyleSheet ?? globalThis.CSSStyleSheet;
-    const sheet = new Constructor();
-    sheet.replaceSync(VEGA_DEFAULT_THEME_CSS);
-    document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
-    return () => {
-      document.adoptedStyleSheets = document.adoptedStyleSheets.filter((candidate) => candidate !== sheet);
-    };
-  } catch {
-    const style = document.createElement("style");
-    style.dataset.vegaShellStyle = "";
-    style.textContent = VEGA_DEFAULT_THEME_CSS;
-    (document.head ?? document.documentElement).append(style);
-    return () => style.remove();
-  }
-};
+  append(root, parseAdvRichText(source));
+}

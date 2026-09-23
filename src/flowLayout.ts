@@ -78,27 +78,17 @@ export const layoutVegaShellFlow = (
     layer.push(node);
     layers.set(depth, layer);
   }
-  minimizeLayerCrossings(
-    layers,
-    incomingIds,
-    outgoing,
-    new Map(nodes.map((node, index) => [node.id, index])),
-  );
+  minimizeLayerCrossings(layers, incomingIds, outgoing, new Map(nodes.map((node, index) => [node.id, index])));
   const layerEntries = [...layers.entries()].sort(([left], [right]) => left - right);
   const maximumLayerSize = Math.max(1, ...layerEntries.map(([, layer]) => layer.length));
-  const contentWidth =
-    maximumLayerSize * VEGA_FLOW_NODE_WIDTH + Math.max(0, maximumLayerSize - 1) * HORIZONTAL_GAP;
+  const contentWidth = maximumLayerSize * VEGA_FLOW_NODE_WIDTH + Math.max(0, maximumLayerSize - 1) * HORIZONTAL_GAP;
   const maximumDepth = Math.max(0, ...layerEntries.map(([depth]) => depth));
   const width = CANVAS_MARGIN * 2 + contentWidth;
-  const height =
-    CANVAS_MARGIN * 2 +
-    (maximumDepth + 1) * VEGA_FLOW_NODE_HEIGHT +
-    maximumDepth * VERTICAL_GAP;
+  const height = CANVAS_MARGIN * 2 + (maximumDepth + 1) * VEGA_FLOW_NODE_HEIGHT + maximumDepth * VERTICAL_GAP;
   const layoutNodes: VegaFlowLayoutNode[] = [];
 
   for (const [depth, layer] of layerEntries) {
-    const layerWidth =
-      layer.length * VEGA_FLOW_NODE_WIDTH + Math.max(0, layer.length - 1) * HORIZONTAL_GAP;
+    const layerWidth = layer.length * VEGA_FLOW_NODE_WIDTH + Math.max(0, layer.length - 1) * HORIZONTAL_GAP;
     const layerLeft = CANVAS_MARGIN + (contentWidth - layerWidth) / 2;
     layer.forEach((node, index) => {
       layoutNodes.push({
@@ -131,17 +121,8 @@ const minimizeLayerCrossings = (
 ): void => {
   const depths = [...layers.keys()].sort((left, right) => left - right);
   const ranks = (): Map<string, number> =>
-    new Map(
-      depths.flatMap((depth) =>
-        (layers.get(depth) ?? []).map(
-          (node, index) => [node.id, index] as const,
-        ),
-      ),
-    );
-  const sweep = (
-    orderedDepths: readonly number[],
-    neighbours: ReadonlyMap<string, readonly string[]>,
-  ): void => {
+    new Map(depths.flatMap((depth) => (layers.get(depth) ?? []).map((node, index) => [node.id, index] as const)));
+  const sweep = (orderedDepths: readonly number[], neighbours: ReadonlyMap<string, readonly string[]>): void => {
     const currentRanks = ranks();
     for (const depth of orderedDepths) {
       const layer = layers.get(depth);

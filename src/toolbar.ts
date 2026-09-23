@@ -1,3 +1,4 @@
+import { shellText, shellUiLocale } from "./i18n";
 import type { VegaDisposable, VegaUiSlotContext } from "@haneoka/vega/plugin";
 import { VEGA_SHELL_CONTROLLER } from "@haneoka/vega/shell";
 import { createVegaShellIcon } from "./icons";
@@ -15,10 +16,7 @@ export const mountDefaultToolbar = (host: HTMLElement, context: VegaUiSlotContex
   menu.className = "vega-default-toolbar__menu";
   const menuLabel = document.createElement("span");
   menuLabel.textContent = "Menu";
-  menu.append(
-    menuLabel,
-    createVegaShellIcon(document, "chevron-down"),
-  );
+  menu.append(menuLabel, createVegaShellIcon(document, "chevron-down"));
   menu.setAttribute("aria-haspopup", "dialog");
   menu.setAttribute("aria-label", "Open game menu");
   menu.setAttribute("aria-expanded", "false");
@@ -30,6 +28,7 @@ export const mountDefaultToolbar = (host: HTMLElement, context: VegaUiSlotContex
 
   const render = (): void => {
     const snapshot = controller.snapshot();
+    menuLabel.textContent = shellText("Menu", shellUiLocale(snapshot.settings.uiLanguage, document));
     root.hidden = snapshot.screen !== "game";
     menu.setAttribute("aria-expanded", String(snapshot.screen === "menu"));
   };
