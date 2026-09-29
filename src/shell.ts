@@ -1,9 +1,5 @@
-import {
-  parseAdvRichText,
-  type AdvRichTextNode,
-  type VegaDisposable,
-  type VegaUiSlotContext,
-} from "@haneoka/vega/plugin";
+import { type VegaDisposable, type VegaUiSlotContext } from "@haneoka/vega/plugin";
+import { parseAdvRichText, type AdvRichTextNode } from "@haneoka/vega-plugin-richtext";
 import {
   VEGA_SHELL_CONTROLLER,
   VEGA_SHELL_TYPOGRAPHY,
@@ -173,7 +169,10 @@ export function mountDefaultShell(host: HTMLElement, context: VegaUiSlotContext)
       setError("");
       await action();
     } catch (error) {
-      setError(error instanceof Error ? error.message : String(error));
+      // In-playback action failures (a rejected save, a unavailable panel
+      // resource) degrade to the console: an error bubble without a close
+      // affordance must never linger over the episode.
+      console.warn("[vega-shell] action failed", error);
     } finally {
       busy = false;
       root.removeAttribute("aria-busy");
