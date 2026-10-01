@@ -105,6 +105,12 @@ const text: Readonly<Record<string, readonly [string, string, string, string]>> 
   "Text speed": ["文字表示速度", "文字显示速度", "文字顯示速度", "텍스트 표시 속도"],
   "Text size": ["文字サイズ", "文字大小", "文字大小", "글자 크기"],
   "Instant text": ["テキスト即時表示", "即时显示文字", "即時顯示文字", "텍스트 즉시 표시"],
+  "Web text for translation": [
+    "ブラウザー翻訳用のウェブ文字",
+    "网页文字（浏览器翻译）",
+    "網頁文字（瀏覽器翻譯）",
+    "웹 텍스트 (브라우저 번역)",
+  ],
   Subtitles: ["字幕", "字幕", "字幕", "자막"],
   "Enable music": ["BGMを有効にする", "启用背景音乐", "啟用背景音樂", "배경 음악 사용"],
   "Auto delay": ["オート待ち時間", "自动播放间隔", "自動播放間隔", "자동 진행 대기 시간"],

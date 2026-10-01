@@ -494,6 +494,7 @@ export function mountDefaultShell(host: HTMLElement, context: VegaUiSlotContext)
         range("textSize", "Text size", 0.5, 2, 0.05);
         range("autoDelay", "Auto delay", 0, 10, 0.1);
         toggle("instantText", "Instant text");
+        toggle("webText", "Web text for translation");
         const preview = node("div", "vega-shell__text-preview");
         preview.append(
           text("span", "TEXT PREVIEW", "vega-shell__eyebrow", false),
@@ -621,7 +622,7 @@ export function mountDefaultShell(host: HTMLElement, context: VegaUiSlotContext)
       body.append(setting(label, input, output));
     };
     const toggle = (
-      key: "instantText" | "bgmEnabled" | "subtitlesEnabled" | "reducedMotion" | "highContrast",
+      key: "instantText" | "webText" | "bgmEnabled" | "subtitlesEnabled" | "reducedMotion" | "highContrast",
       label: string,
     ) => {
       const input = node("input");
