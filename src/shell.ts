@@ -553,7 +553,19 @@ export function mountDefaultShell(host: HTMLElement, context: VegaUiSlotContext)
             const project = context.player.story.vegaProject as { locales?: unknown } | undefined;
             const locales = project?.locales ?? context.player.story.localization?.locales ?? [];
             if (Array.isArray(locales))
-              for (const language of locales) {
+              for (const language of [...locales].sort((left, right) => {
+                const rank = (value: unknown): number => {
+                  if (typeof value !== "string") return 5;
+                  const tag = value.toLowerCase().replaceAll("_", "-");
+                  if (tag === "ja" || tag.startsWith("ja-")) return 0;
+                  if (tag === "en" || tag.startsWith("en-")) return 1;
+                  if (/^zh-(?:tw|hant)(?:-|$)/u.test(tag)) return 2;
+                  if (tag === "zh" || /^zh-(?:cn|hans)(?:-|$)/u.test(tag)) return 3;
+                  if (tag === "ko" || tag.startsWith("ko-")) return 4;
+                  return 5;
+                };
+                return rank(left) - rank(right);
+              })) {
                 if (typeof language !== "string" || languages.has(language)) continue;
                 let label = language;
                 try {
