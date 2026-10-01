@@ -544,8 +544,8 @@ export function mountDefaultShell(host: HTMLElement, context: VegaUiSlotContext)
             for (const [code, label] of [
               ["ja", "日本語"],
               ["en", "English"],
-              ["zh-CN", "简体中文"],
               ["zh-TW", "繁體中文"],
+              ["zh-CN", "简体中文"],
               ["ko", "한국어"],
             ])
               languages.set(code!, label!);
