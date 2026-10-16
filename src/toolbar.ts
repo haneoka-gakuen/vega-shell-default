@@ -1,5 +1,6 @@
+import type { VegaWebUiSlotContext as VegaUiSlotContext } from "@haneoka/vega/web/ui";
 import { shellText, shellUiLocale } from "./i18n";
-import type { VegaDisposable, VegaUiSlotContext } from "@haneoka/vega/plugin";
+import type { VegaDisposable } from "@haneoka/vega/plugin";
 import { VEGA_SHELL_CONTROLLER } from "@haneoka/vega/shell";
 import { createVegaShellIcon } from "./icons";
 

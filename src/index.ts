@@ -22,6 +22,7 @@ export const vegaDefaultShell = defineVegaPlugin({
     context.contribute("ui-slot", {
       id: "default-shell",
       name: "Default visual novel shell",
+      hostKind: "web",
       slot: "stage-overlay",
       requiredServices: [VEGA_SHELL_CONTROLLER],
       mount: mountDefaultShell,
@@ -29,6 +30,7 @@ export const vegaDefaultShell = defineVegaPlugin({
     context.contribute("ui-slot", {
       id: "default-toolbar",
       name: "Default visual novel controls",
+      hostKind: "web",
       slot: "controls",
       requiredServices: [VEGA_SHELL_CONTROLLER],
       mount: mountDefaultToolbar,

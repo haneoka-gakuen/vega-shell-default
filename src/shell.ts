@@ -1,4 +1,5 @@
-import { type VegaDisposable, type VegaUiSlotContext } from "@haneoka/vega/plugin";
+import type { VegaWebUiSlotContext as VegaUiSlotContext } from "@haneoka/vega/web/ui";
+import { type VegaDisposable } from "@haneoka/vega/plugin";
 import { parseAdvRichText, type AdvRichTextNode } from "@haneoka/vega-plugin-richtext";
 import {
   VEGA_SHELL_CONTROLLER,
@@ -100,6 +101,8 @@ export function mountDefaultShell(host: HTMLElement, context: VegaUiSlotContext)
     previousLocale = "",
     previousFocus: HTMLElement | null = null;
   let page = 0,
+    backlogPage = 0,
+    backlogSignature = "",
     saveGroup = "manual",
     settingsTab = "reading",
     query = "",
@@ -303,6 +306,11 @@ export function mountDefaultShell(host: HTMLElement, context: VegaUiSlotContext)
       refreshControls();
       return;
     }
+    if (snapshot.screen === "backlog") {
+      const signature = JSON.stringify([locale, snapshot.settings.language, snapshot.settings.webText, snapshot.backlog]);
+      if (!screenChanged && signature === backlogSignature) return;
+      backlogSignature = signature;
+    }
     previousScreen = snapshot.screen;
     previousLocale = locale;
     clearView();
@@ -494,7 +502,8 @@ export function mountDefaultShell(host: HTMLElement, context: VegaUiSlotContext)
         range("textSize", "Text size", 0.5, 2, 0.05);
         range("autoDelay", "Auto delay", 0, 10, 0.1);
         toggle("instantText", "Instant text");
-        toggle("webText", "Web text for translation");
+        toggle("webText", "Selectable text");
+        body.append(text("p", "Use standard text to select, copy, and translate dialogue.", "vega-shell__setting-hint"));
         const preview = node("div", "vega-shell__text-preview");
         preview.append(
           text("span", "TEXT PREVIEW", "vega-shell__eyebrow", false),
@@ -814,20 +823,25 @@ export function mountDefaultShell(host: HTMLElement, context: VegaUiSlotContext)
     search.value = query;
     toolbar.append(search);
     const entries = node("div", "vega-shell__backlog");
+    const pagination = node("nav", "vega-shell__pagination");
+    const searchable = [...snapshot.backlog].reverse().map((entry) => ({
+      entry,
+      search: `${entry.speaker}\n${plain(entry.text)}`.toLocaleLowerCase(),
+    }));
+    const pageSize = 30;
     const update = () => {
       typography?.releaseWithin(entries);
       silence();
       entries.replaceChildren();
-      const filtered = [...snapshot.backlog]
-        .reverse()
-        .filter((entry) =>
-          `${entry.speaker}\n${plain(entry.text)}`.toLocaleLowerCase().includes(query.toLocaleLowerCase()),
-        );
+      const needle = query.toLocaleLowerCase();
+      const filtered = searchable.filter((item) => item.search.includes(needle));
+      const pages = Math.max(1, Math.ceil(filtered.length / pageSize));
+      backlogPage = Math.min(backlogPage, pages - 1);
       if (!filtered.length)
         entries.append(
           text("p", snapshot.backlog.length ? "No matching dialogue" : "The backlog is empty.", "vega-shell__empty"),
         );
-      for (const entry of filtered) {
+      for (const { entry } of filtered.slice(backlogPage * pageSize, (backlogPage + 1) * pageSize)) {
         const row = node("article", "vega-shell__log-row"),
           speaker = text("strong", entry.speaker || t("Narration"), "vega-shell__log-speaker", false),
           body = node("div", "vega-shell__log-text");
@@ -864,13 +878,23 @@ export function mountDefaultShell(host: HTMLElement, context: VegaUiSlotContext)
         row.append(speaker, body, actions);
         entries.append(row);
       }
+      typography?.releaseWithin(pagination);
+      pagination.replaceChildren(
+        button("Newer dialogue", () => { backlogPage--; update(); }, { disabled: backlogPage === 0 }),
+        text("span", `${backlogPage + 1} / ${pages}`, "", false),
+        button("Older dialogue", () => { backlogPage++; update(); }, { disabled: backlogPage + 1 === pages }),
+      );
+      pagination.hidden = pages === 1;
+      entries.scrollTop = 0;
       paintText(entries);
+      paintText(pagination);
     };
     search.addEventListener("input", () => {
       query = search.value;
+      backlogPage = 0;
       update();
     });
-    content.append(toolbar, entries);
+    content.append(toolbar, entries, pagination);
     update();
   }
   function renderGallery(content: HTMLElement) {
@@ -949,6 +973,10 @@ export function mountDefaultShell(host: HTMLElement, context: VegaUiSlotContext)
     else await context.root.requestFullscreen();
   }
   const restoreUi = () => delete context.root.dataset.vegaUiHidden;
+  const toggleUi = () => {
+    if (context.root.dataset.vegaUiHidden) restoreUi();
+    else context.root.dataset.vegaUiHidden = "true";
+  };
   function onKey(event: KeyboardEvent) {
     if (event.defaultPrevented) return;
     const target = event.target as HTMLElement | null,
@@ -978,15 +1006,15 @@ export function mountDefaultShell(host: HTMLElement, context: VegaUiSlotContext)
       void open("menu");
     } else if (event.key.toLowerCase() === "a") controller.toggleAuto();
     else if (event.key.toLowerCase() === "h") {
-      if (context.root.dataset.vegaUiHidden) restoreUi();
-      else context.root.dataset.vegaUiHidden = "true";
+      event.preventDefault();
+      toggleUi();
     } else if (event.key.toLowerCase() === "l") void open("backlog");
   }
   context.root.addEventListener("keydown", onKey, { signal: events.signal });
   context.root.addEventListener(
     "pointerdown",
     (event) => {
-      if (context.root.dataset.vegaUiHidden) {
+      if (event.button === 0 && context.root.dataset.vegaUiHidden) {
         event.preventDefault();
         event.stopImmediatePropagation();
         restoreUi();
@@ -999,7 +1027,7 @@ export function mountDefaultShell(host: HTMLElement, context: VegaUiSlotContext)
     (event) => {
       if ((event.target as HTMLElement)?.closest("input,textarea,select")) return;
       event.preventDefault();
-      if (snapshot.screen === "game") void open("menu");
+      if (snapshot.screen === "game") toggleUi();
       else close();
     },
     { signal: events.signal },

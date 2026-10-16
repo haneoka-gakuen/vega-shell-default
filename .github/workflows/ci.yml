@@ -28,6 +28,12 @@ jobs:
           repository: haneoka-gakuen/vega
           path: vega-shell-default/.dependencies/vega
 
+      - name: Check out rich-text runtime
+        uses: actions/checkout@v7
+        with:
+          repository: haneoka-gakuen/vega-plugin-richtext
+          path: vega-shell-default/.dependencies/vega-plugin-richtext
+
       - name: Set up pnpm
         uses: pnpm/action-setup@v6
         with:
@@ -40,6 +46,9 @@ jobs:
           cache: pnpm
           cache-dependency-path: vega-shell-default/pnpm-lock.yaml
 
+      - name: Set up locked Rust/WASM tools
+        uses: ./vega-shell-default/.dependencies/vega/.github/actions/setup-wasm
+
       - name: Install dependencies
         working-directory: vega-shell-default
         run: pnpm install --no-frozen-lockfile
@@ -51,6 +60,10 @@ jobs:
       - name: Build Vega
         working-directory: vega-shell-default
         run: pnpm --filter @haneoka/vega build:core
+
+      - name: Build rich-text runtime
+        working-directory: vega-shell-default
+        run: pnpm --filter @haneoka/vega-plugin-richtext build
 
       - name: Check package
         working-directory: vega-shell-default
