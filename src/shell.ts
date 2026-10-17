@@ -82,7 +82,15 @@ function installStyle(document: Document) {
   };
 }
 let serial = 0;
-export function mountDefaultShell(host: HTMLElement, context: VegaUiSlotContext): VegaDisposable {
+export interface DefaultShellOptions {
+  readonly displaySettings?: (host: HTMLElement, context: VegaUiSlotContext) => VegaDisposable;
+}
+
+export function mountDefaultShell(
+  host: HTMLElement,
+  context: VegaUiSlotContext,
+  options: DefaultShellOptions = {},
+): VegaDisposable {
   const service = context.services(VEGA_SHELL_CONTROLLER);
   if (!service) throw new Error("A shell controller is required");
   const controller = service;
@@ -110,6 +118,7 @@ export function mountDefaultShell(host: HTMLElement, context: VegaUiSlotContext)
     epoch = 0,
     busy = false,
     viewCleanup: (() => void) | undefined;
+  let displaySettings: VegaDisposable | undefined;
   let colorMode: VegaShellColorMode = "dark";
   let storage: Storage | null = null;
   try {
@@ -191,6 +200,8 @@ export function mountDefaultShell(host: HTMLElement, context: VegaUiSlotContext)
   }
   function clearView() {
     epoch++;
+    release(displaySettings);
+    displaySettings = undefined;
     viewCleanup?.();
     viewCleanup = undefined;
     silence();
@@ -487,6 +498,8 @@ export function mountDefaultShell(host: HTMLElement, context: VegaUiSlotContext)
     body.id = `${id}-settings`;
     const select = (key: string) => {
       settingsTab = key;
+      release(displaySettings);
+      displaySettings = undefined;
       typography?.releaseWithin(body);
       body.replaceChildren();
       for (const tab of tabs.querySelectorAll<HTMLButtonElement>("button")) {
@@ -541,6 +554,7 @@ export function mountDefaultShell(host: HTMLElement, context: VegaUiSlotContext)
             icon: "fullscreen",
           }),
         );
+        displaySettings = options.displaySettings?.(body, context);
       } else
         for (const [name, label] of [
           ["uiLanguage", "Interface language"],

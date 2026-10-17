@@ -59,7 +59,8 @@ export const VEGA_DEFAULT_THEME_CSS = String.raw`
 .vega-shell input[type=checkbox]::before{content:"";position:absolute;width:13px;height:13px;top:3px;left:4px;border-radius:50%;background:var(--vega-shell-muted);transition:transform .15s,background .15s}
 .vega-shell input[type=checkbox]:checked{border-color:var(--vega-shell-accent-soft);background:color-mix(in srgb,var(--vega-shell-accent-soft) 18%,transparent)}
 .vega-shell input[type=checkbox]:checked::before{background:var(--vega-shell-accent-soft);transform:translateX(15px)}
-.vega-shell select{grid-column:2/4;justify-self:end;max-width:100%;width:min(25cqw,270px);border:1px solid var(--vega-shell-line);border-radius:3px;background:var(--vega-shell-surface-strong);padding:.5em .8em;min-height:36px}
+.vega-shell select{justify-self:end;max-width:100%;border:1px solid var(--vega-shell-line);border-radius:3px;background:var(--vega-shell-surface-strong);padding:.5em .8em}
+.vega-shell__setting>select{grid-column:2/4;width:min(25cqw,270px);min-height:36px}
 .vega-shell__setting-action{margin-top:2cqh;border:1px solid var(--vega-shell-line)!important}
 .vega-shell__text-preview{margin-top:3cqh;border-left:2px solid var(--vega-shell-accent-soft);padding:1.4cqh 2cqw;background:var(--vega-shell-surface)}
 .vega-shell__text-preview>p{font-size:calc(1em * var(--vega-text-size,1));line-height:1.8;margin-top:1cqh;white-space:pre-line}

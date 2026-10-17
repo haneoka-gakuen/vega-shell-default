@@ -1,44 +1,49 @@
 import { defineVegaPlugin } from "@haneoka/vega/plugin";
 import { VEGA_SHELL_CONTROLLER } from "@haneoka/vega/shell";
-import { mountDefaultShell } from "./shell";
+import type { VegaWebUiSlotContext } from "@haneoka/vega/web/ui";
+import { mountDefaultShell, type DefaultShellOptions } from "./shell";
 import { mountDefaultToolbar } from "./toolbar";
 import { VEGA_DEFAULT_THEME_CSS } from "./theme";
 
-export const vegaDefaultShell = defineVegaPlugin({
-  manifest: {
-    id: "haneoka.vega-shell-default",
-    name: "Vega Default Shell",
-    version: "0.1.0",
-    apiVersion: 1,
-    description: "Accessible title, menu, saves, settings, backlog, gallery, and flowchart UI",
-    capabilities: ["theme", "ui-slot"],
-  },
-  setup(context) {
-    context.contribute("theme", {
-      id: "default",
-      name: "Vega Default",
-      cssText: VEGA_DEFAULT_THEME_CSS,
-    });
-    context.contribute("ui-slot", {
-      id: "default-shell",
-      name: "Default visual novel shell",
-      hostKind: "web",
-      slot: "stage-overlay",
-      requiredServices: [VEGA_SHELL_CONTROLLER],
-      mount: mountDefaultShell,
-    });
-    context.contribute("ui-slot", {
-      id: "default-toolbar",
-      name: "Default visual novel controls",
-      hostKind: "web",
-      slot: "controls",
-      requiredServices: [VEGA_SHELL_CONTROLLER],
-      mount: mountDefaultToolbar,
-    });
-  },
-});
+export const createDefaultShellPlugin = (options: DefaultShellOptions = {}) =>
+  defineVegaPlugin({
+    manifest: {
+      id: "haneoka.vega-shell-default",
+      name: "Vega Default Shell",
+      version: "0.1.0",
+      apiVersion: 1,
+      description: "Accessible title, menu, saves, settings, backlog, gallery, and flowchart UI",
+      capabilities: ["theme", "ui-slot"],
+    },
+    setup(context) {
+      context.contribute("theme", {
+        id: "default",
+        name: "Vega Default",
+        cssText: VEGA_DEFAULT_THEME_CSS,
+      });
+      context.contribute("ui-slot", {
+        id: "default-shell",
+        name: "Default visual novel shell",
+        hostKind: "web",
+        slot: "stage-overlay",
+        requiredServices: [VEGA_SHELL_CONTROLLER],
+        mount: (host: HTMLElement, context: VegaWebUiSlotContext) => mountDefaultShell(host, context, options),
+      });
+      context.contribute("ui-slot", {
+        id: "default-toolbar",
+        name: "Default visual novel controls",
+        hostKind: "web",
+        slot: "controls",
+        requiredServices: [VEGA_SHELL_CONTROLLER],
+        mount: mountDefaultToolbar,
+      });
+    },
+  });
+
+export const vegaDefaultShell = createDefaultShellPlugin();
 
 export { mountDefaultShell } from "./shell";
+export type { DefaultShellOptions } from "./shell";
 export { mountDefaultToolbar } from "./toolbar";
 export { VEGA_DEFAULT_THEME_CSS } from "./theme";
 export {
