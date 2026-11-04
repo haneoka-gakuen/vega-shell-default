@@ -20,13 +20,13 @@ import { VEGA_DEFAULT_THEME_CSS } from "./theme";
 import { vegaShellSaveSlotNames } from "./saveSlots";
 
 const pages = [
-  ["menu", "Menu", "SYSTEM"],
-  ["save", "Save", "SAVE"],
-  ["load", "Load", "LOAD"],
-  ["backlog", "Backlog", "BACKLOG"],
-  ["flowchart", "Flowchart", "FLOWCHART"],
-  ["settings", "Settings", "CONFIG"],
-  ["gallery", "Extra", "EXTRA"],
+  ["menu", "Menu"],
+  ["save", "Save"],
+  ["load", "Load"],
+  ["backlog", "Backlog"],
+  ["flowchart", "Flowchart"],
+  ["settings", "Settings"],
+  ["gallery", "Extra"],
 ] as const;
 const pageIcons: Record<string, VegaShellIconName> = {
   menu: "menu",
@@ -318,7 +318,12 @@ export function mountDefaultShell(
       return;
     }
     if (snapshot.screen === "backlog") {
-      const signature = JSON.stringify([locale, snapshot.settings.language, snapshot.settings.webText, snapshot.backlog]);
+      const signature = JSON.stringify([
+        locale,
+        snapshot.settings.language,
+        snapshot.settings.webText,
+        snapshot.backlog,
+      ]);
       if (!screenChanged && signature === backlogSignature) return;
       backlogSignature = signature;
     }
@@ -337,7 +342,7 @@ export function mountDefaultShell(
       heading = node("div", "vega-shell__heading");
     const pageInfo = pages.find(([key]) => key === snapshot.screen),
       eyebrow = node("span", "vega-shell__eyebrow");
-    eyebrow.textContent = snapshot.screen === "title" ? "VISUAL NOVEL" : (pageInfo?.[2] ?? "SYSTEM");
+    eyebrow.textContent = t(snapshot.screen === "title" ? "Visual novel" : (pageInfo?.[1] ?? "Menu"));
     const title = text(
       snapshot.screen === "title" ? "h1" : "h2",
       snapshot.screen === "title" ? snapshot.title : (pageInfo?.[1] ?? "Menu"),
@@ -362,13 +367,10 @@ export function mountDefaultShell(
     if (!["title", "menu"].includes(snapshot.screen)) {
       const nav = node("nav", "vega-shell__navigation");
       nav.setAttribute("aria-label", t("Game menu pages"));
-      for (const [key, label, en] of pages) {
+      for (const [key, label] of pages) {
         if (key === "menu") continue;
         if (snapshot.navigationOrigin === "title" && key === "save") continue;
         const item = button(label, () => open(key));
-        const sub = node("small");
-        sub.textContent = en;
-        item.append(sub);
         item.dataset.page = key;
         if (key === snapshot.screen) item.setAttribute("aria-current", "page");
         nav.append(item);
@@ -444,7 +446,7 @@ export function mountDefaultShell(
       );
     const aside = node("aside", "vega-shell__now-playing");
     aside.append(
-      text("span", title ? "YOUR STORY" : "NOW PLAYING", "vega-shell__eyebrow", false),
+      text("span", title ? "Your story" : "Now playing", "vega-shell__eyebrow"),
       text("h3", snapshot.title, "", false),
     );
     const talk = context.state.talk,
@@ -516,10 +518,12 @@ export function mountDefaultShell(
         range("autoDelay", "Auto delay", 0, 10, 0.1);
         toggle("instantText", "Instant text");
         toggle("webText", "Selectable text");
-        body.append(text("p", "Use standard text to select, copy, and translate dialogue.", "vega-shell__setting-hint"));
+        body.append(
+          text("p", "Use standard text to select, copy, and translate dialogue.", "vega-shell__setting-hint"),
+        );
         const preview = node("div", "vega-shell__text-preview");
         preview.append(
-          text("span", "TEXT PREVIEW", "vega-shell__eyebrow", false),
+          text("span", "Preview text", "vega-shell__eyebrow"),
           text("p", plain(context.state.talk.text) || t("Preview text"), "", false),
         );
         body.append(preview);
@@ -713,7 +717,7 @@ export function mountDefaultShell(
         ordinal.textContent = /^\d+$/u.test(slot)
           ? String(Number(slot)).padStart(3, "0")
           : slot === "quick"
-            ? "QUICK"
+            ? t("Quick save")
             : slot;
         const date = node("time");
         date.textContent = save
@@ -732,12 +736,19 @@ export function mountDefaultShell(
           image.append(img);
         } else {
           const mark = node("span");
-          mark.textContent = save ? "RECORD" : "NO DATA";
+          mark.textContent = t(save ? "Saved" : "Empty slot");
           image.append(mark);
         }
         const caption = node("div", "vega-shell__save-caption");
         caption.append(
-          text("strong", save?.label || save?.presentation?.speaker || t(save ? "Narration" : "Empty slot"), "", false),
+          text(
+            "strong",
+            save && slot === "quick"
+              ? t("Quick save")
+              : save?.label || save?.presentation?.speaker || t(save ? "Narration" : "Empty slot"),
+            "",
+            false,
+          ),
           text(
             "p",
             plain(
@@ -894,9 +905,23 @@ export function mountDefaultShell(
       }
       typography?.releaseWithin(pagination);
       pagination.replaceChildren(
-        button("Newer dialogue", () => { backlogPage--; update(); }, { disabled: backlogPage === 0 }),
+        button(
+          "Newer dialogue",
+          () => {
+            backlogPage--;
+            update();
+          },
+          { disabled: backlogPage === 0 },
+        ),
         text("span", `${backlogPage + 1} / ${pages}`, "", false),
-        button("Older dialogue", () => { backlogPage++; update(); }, { disabled: backlogPage + 1 === pages }),
+        button(
+          "Older dialogue",
+          () => {
+            backlogPage++;
+            update();
+          },
+          { disabled: backlogPage + 1 === pages },
+        ),
       );
       pagination.hidden = pages === 1;
       entries.scrollTop = 0;

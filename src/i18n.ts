@@ -1,5 +1,9 @@
 type UiLocale = "en" | "ja" | "zh-CN" | "zh-TW" | "ko";
 const text: Readonly<Record<string, readonly [string, string, string, string]>> = {
+  "Visual novel": ["ビジュアルノベル", "视觉小说", "視覺小說", "비주얼 노벨"],
+  "Your story": ["あなたの物語", "你的故事", "你的故事", "나의 이야기"],
+  Saved: ["保存済み", "已保存", "已儲存", "저장됨"],
+  "Now playing": ["再生中", "正在播放", "正在播放", "재생 중"],
   "Back to game": ["ゲームに戻る", "返回故事", "返回故事", "게임으로 돌아가기"],
   "Esc · Back": ["Esc · 戻る", "Esc · 返回", "Esc · 返回", "Esc · 돌아가기"],
   "Choose a chapter of your story": [
